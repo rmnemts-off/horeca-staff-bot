@@ -20,6 +20,21 @@ cocktail in five seconds. Everything here follows from that.
 The card must survive a row that has nothing but a name and its ingredients — that is the
 normal state of a venue that has just started typing its recipes in (TZ 8.1).
 
+**Filling the section is the other half** (decision B5, plan task 30a). Without a way to
+enter a recipe from the bot the TTK section of a venue stays empty forever and TZ 5.5 cannot
+be walked through at all. :class:`RecipeDraft` is what the wizard collects,
+:func:`parse_ingredients` turns the composition — which arrives as text, because a
+line-by-line wizard for eight ingredients is an hour of typing (the same reasoning as
+decision B6) — into rows, and :meth:`RecipeService.create` refuses a second card carrying the
+key of decision D6 instead of quietly overwriting the first.
+
+Units are the one thing this module has no words for. `Unit` is a closed set fixed by code
+(TZ 4.4), but its short forms are interface language and language lives in
+``src/bot/texts/``. So the vocabulary is handed in (``units=``) and an amount whose unit is
+not in it is kept verbatim in `qty_text` rather than guessed at — decision D4 and TZ 7 keep
+non-numeric amounts as they were typed, and a unit this layer invented would be worse than
+no unit at all.
+
 No wording lives in this module: it returns structures, and the renderer turns them into a
 message (plan, task 21).
 """
@@ -29,18 +44,101 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import Any, Final, Protocol
 
 from src.db.models import Recipe, RecipeIngredient, Unit
 from src.db.repositories.protocols import RecipeIngredientRepository, RecipeRepository
+from src.services.access import AccessContext, AccessError, require_manager
+from src.services.audit import SILENT, AuditEntity, AuditTrail, snapshot
 
 #: TZ 5.5: "at most 10, with pagination".
 MAX_SEARCH_RESULTS = 10
 
+#: How many rows of one category are read at a time while looking for the twin of decision
+#: D6. A venue names a few hundred recipes in all (TZ 5.5), so one chunk normally answers;
+#: the loop that uses it is there so the answer stays complete when one does not.
+CATEGORY_SCAN_LIMIT = 100
+
+#: A service given no unit vocabulary: every amount then stays text (decision D4). The words
+#: themselves are interface language and live in `src/bot/texts/recipes.py`.
+NO_UNITS: Final[Mapping[str, Unit]] = MappingProxyType({})
+
+#: The columns `create()` writes, and therefore the ones it records. The audit snapshot is
+#: explicit on purpose (see `src/services/audit.py`): a dump of the whole row would carry
+#: fields the edit never touched.
+_AUDITED_FIELDS: Final = (
+    "name",
+    "category",
+    "glassware",
+    "method",
+    "ice",
+    "garnish",
+    "instruction",
+)
+
 _WHITESPACE = re.compile(r"\s+")
+
+#: Between an ingredient and its amount. An em or en dash is punctuation and never stands
+#: inside a word, so it separates on its own; a hyphen is a letter of a compound name
+#: (Coca-Cola, cold-brew) and separates only when it stands apart from the word before it.
+#: The *first* separator splits the line, so an amount written as a range ("40 - 50 ml")
+#: survives whole in `qty_text` instead of being cut in two. The dashes are spelled as
+#: escapes because an en dash in a literal is a character nobody can tell from a hyphen.
+_SEPARATOR = re.compile("\\s+[-\u2013\u2014]\\s*|[\u2013\u2014]")
+
+#: An amount that is nothing but a number: "45", "45.0", "1,5" (decision D4, branch two).
+_BARE_NUMBER = re.compile(r"^\d+(?:[.,]\d+)?$")
+
+#: A number followed by one token, which is a unit only if the vocabulary says so.
+_NUMBER_AND_UNIT = re.compile(r"^(\d+(?:[.,]\d+)?)\s*(\S+)$")
+
+
+# --------------------------------------------------------------------------------------
+# Errors
+# --------------------------------------------------------------------------------------
+
+
+class RecipeError(AccessError):
+    """Base class for the refusals of this module.
+
+    Rooted in :class:`src.services.access.AccessError` like the roster and schedule
+    services: a handler catches one family for "the service said no" and renders a text
+    from ``src/bot/texts/``, while the error middleware keeps everything else a bug.
+    """
+
+
+class RecipeIncompleteError(RecipeError):
+    """A card needs a name and a category before it can exist (TZ 5.5, decision B5).
+
+    Everything else is optional — a card with nothing but a name and a composition is the
+    normal state of a venue that has just started typing (TZ 8.1) — but the category is not
+    decoration: it is half the key of decision D6 and the caption that tells two drinks of
+    the same name apart.
+    """
+
+    def __init__(self, field_name: str) -> None:
+        super().__init__(f"a recipe cannot be created without {field_name}")
+        self.field_name = field_name
+
+
+class RecipeExistsError(RecipeError):
+    """The venue already has this recipe in this category (decision D6).
+
+    Its own error rather than a silent overwrite: the manager typed a whole card, and
+    writing it over the existing one would lose the ingredients of a recipe nobody asked to
+    change. The caller renders "this one is already there" and offers the card that exists —
+    which is why `recipe_id` is carried here.
+    """
+
+    def __init__(self, *, name: str, category: str, recipe_id: int) -> None:
+        super().__init__(f"{name!r} already exists in category {category!r} as recipe {recipe_id}")
+        self.name = name
+        self.category = category
+        self.recipe_id = recipe_id
 
 
 class AmountKind(enum.StrEnum):
@@ -109,6 +207,32 @@ class RecipeCard:
     @property
     def is_seasonal(self) -> bool:
         return self.season_date is not None
+
+
+@dataclass(frozen=True, slots=True)
+class RecipeDraft:
+    """What the wizard of decision B5 collected, before anything is written.
+
+    Only `name` and `category` are required, and that is the whole rule of the minimal form:
+    TZ 5.5 draws a card whose glassware, method, ice, garnish and instruction are absent on
+    most classic recipes, and a form that demanded them would stop a manager from entering
+    the drink they actually have. The category is not in that list — it is half the key of
+    decision D6 and the caption that tells two drinks of the same name apart.
+
+    `ingredients` is text, not rows: the composition arrives the way a person writes it,
+    "name — amount" per line, and :func:`parse_ingredients` reads it. Several elements or one
+    element with newlines are the same input — the wizard may hand over the message it got
+    without splitting it first.
+    """
+
+    name: str
+    category: str
+    glassware: str | None = None
+    method: str | None = None
+    ice: str | None = None
+    garnish: str | None = None
+    instruction: str | None = None
+    ingredients: Sequence[str] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +322,40 @@ def classify_amount(
     return AmountKind.ABSENT
 
 
+def parse_ingredients(
+    text: str,
+    *,
+    units: Mapping[str, Unit] = NO_UNITS,
+) -> tuple[IngredientLine, ...]:
+    """Read a typed composition into rows (decision B5, D4; TZ 7).
+
+    One line is one ingredient. The amount is whatever follows the dash; a line without a
+    dash is an ingredient named without an amount, which is a valid line — TZ 5.5 shows
+    "Soda — top" and the reference book has rows with no quantity at all. Blank lines and a
+    line that names nothing are dropped rather than stored as an empty ingredient.
+
+    The amount lands in one of the three branches of :func:`classify_amount`, and the branch
+    is decided by what can be read, never by what could be assumed:
+
+    * a number and a unit the caller's vocabulary knows -> `qty` + `unit`, the measured form;
+    * a bare number -> `qty` alone. The reference book stores "45.0" with the unit implied by
+      the ingredient, and TZ 7 keeps it that way;
+    * anything else -> `qty_text`, **exactly as it was typed**. "top up", "5 leaves",
+      "2/3 dash", and equally "45 ml" when the vocabulary has no word for millilitres: a unit
+      this layer guessed at would be a number the venue never wrote (decision D4).
+
+    Pure on purpose — no repository, no venue, no clock — so that the wizard can show the
+    manager what it understood before anything is saved.
+    """
+    vocabulary = {word.strip().casefold(): unit for word, unit in units.items()}
+    lines: list[IngredientLine] = []
+    for raw in text.splitlines():
+        parsed = _ingredient_from_line(raw, len(lines), vocabulary)
+        if parsed is not None:
+            lines.append(parsed)
+    return tuple(lines)
+
+
 class RecipeService:
     """Business logic of TZ 5.5. Returns structures; wording is task 21."""
 
@@ -207,10 +365,16 @@ class RecipeService:
         recipes: RecipeRepository,
         ingredients: RecipeIngredientRepository,
         notifier: RecipeNotifier,
+        units: Mapping[str, Unit] = NO_UNITS,
+        audit: AuditTrail = SILENT,
     ) -> None:
         self._recipes = recipes
         self._ingredients = ingredients
         self._notifier = notifier
+        #: Unit words the venue's interface speaks; see the module docstring for why they
+        #: are handed in instead of being written here.
+        self._units = units
+        self._audit = audit
 
     async def search(
         self,
@@ -265,21 +429,96 @@ class RecipeService:
             return None
 
         rows = await self._ingredients.list_for_recipe(recipe.id)
-        return RecipeCard(
-            recipe_id=recipe.id,
-            name=recipe.name.strip(),
-            category=recipe.category,
-            is_library=recipe.venue_id is None,
-            glassware=_clean(recipe.glassware),
-            method=_clean(recipe.method),
-            ice=_clean(recipe.ice),
-            garnish=_clean(recipe.garnish),
-            instruction=_clean(recipe.instruction),
-            season_date=recipe.season_date,
-            yield_variants=recipe.yield_variants,
-            photo_file_id=recipe.photo_file_id,
-            ingredients=tuple(_ingredient_line(row) for row in sorted(rows, key=_ingredient_order)),
+        return _card(recipe, rows)
+
+    async def create(self, actor: AccessContext, draft: RecipeDraft) -> RecipeCard:
+        """Enter a recipe from the bot (decision B5, plan task 30a).
+
+        TZ 5.8 puts the reference data of a venue in the hands of its manager, so
+        :func:`require_manager` guards the write. No venue is taken from the draft: the
+        repository is scoped to one and the actor works in one, and those are the same venue
+        by construction (TZ 3.3) — a venue id in a wizard's payload would be a second answer
+        to a question that already has one.
+
+        The card is returned rather than the row: the wizard shows the manager what was
+        saved, and it is the same structure :meth:`card` renders, so the confirmation screen
+        and the card are the same screen.
+
+        Order matters. The duplicate of decision D6 is refused before anything is written,
+        because the alternative is a half-created recipe rolled back by an index violation
+        the manager cannot read.
+        """
+        require_manager(actor)
+        name = _clean(draft.name)
+        if name is None:
+            raise RecipeIncompleteError("name")
+        category = _clean(draft.category)
+        if category is None:
+            raise RecipeIncompleteError("category")
+
+        existing = await self._twin(name=name, category=category)
+        if existing is not None:
+            raise RecipeExistsError(name=name, category=category, recipe_id=existing.id)
+
+        lines = parse_ingredients("\n".join(draft.ingredients), units=self._units)
+        recipe = await self._recipes.create(
+            name=name,
+            category=category,
+            glassware=_clean(draft.glassware),
+            method=_clean(draft.method),
+            ice=_clean(draft.ice),
+            garnish=_clean(draft.garnish),
+            instruction=_clean(draft.instruction),
+            updated_by=actor.user_id,
         )
+        rows = await self._ingredients.replace_all(
+            recipe.id,
+            [_ingredient_row(line) for line in lines],
+        )
+        await self._audit.created(
+            actor,
+            AuditEntity.RECIPE,
+            recipe.id,
+            after=snapshot(recipe, *_AUDITED_FIELDS),
+        )
+        return _card(recipe, rows)
+
+    async def _twin(self, *, name: str, category: str) -> Recipe | None:
+        """The row decision D6 says this draft would collide with, or `None`.
+
+        The key is `(venue_id, category, lower(btrim(name)))` — the unique index of
+        `recipes`, and the same one :func:`_prefer_local` overlays by, so a venue can hold
+        an Americano the cocktail next to an Americano the coffee.
+
+        Two halves of it are worth spelling out:
+
+        * **library rows are not a collision.** The index treats `venue_id IS NULL` as its
+          own scope, and a venue writing its own version of a shared recipe is exactly what
+          :func:`_prefer_local` exists for. Refusing it here would make the overlay
+          unreachable (TZ 3.3);
+        * **the listing is read in chunks until it ends.** `list_by_category` is a page, and
+          a check that looked at the first page only would let a duplicate through as soon as
+          a category outgrew it — which is precisely when a manager stops remembering what
+          is already there.
+
+        The index remains the final authority: it also covers rows this listing does not show
+        (`is_active = false`). Nothing in stage 0 deactivates a recipe, and when something
+        does, this check is what has to learn about it.
+        """
+        key = _key(name, category)
+        offset = 0
+        while True:
+            found = await self._recipes.list_by_category(
+                category,
+                limit=CATEGORY_SCAN_LIMIT,
+                offset=offset,
+            )
+            for row in found:
+                if row.venue_id is not None and _overlay_key(row) == key:
+                    return row
+            if len(found) < CATEGORY_SCAN_LIMIT:
+                return None
+            offset += CATEGORY_SCAN_LIMIT
 
     async def report_missing(self, *, query: str, reported_by: int) -> MissingRecipeAlert | None:
         """TZ 5.5: the employee says the recipe is not there, the manager hears about it.
@@ -334,9 +573,109 @@ def _ingredient_line(row: RecipeIngredient) -> IngredientLine:
     )
 
 
+def _key(name: str, category: str) -> tuple[str, str]:
+    """Decision D6: a recipe is identified by its category plus its folded name.
+
+    The category is folded too, where the index compares it as written. That is stricter
+    than the index by exactly one case: a second "Coffee" next to an existing "coffee". The
+    index would take it, `list_by_category` folds and would show both rows in one listing,
+    and two identical captions in one list is the thing decision D6 set out to prevent.
+    """
+    return (category.strip().casefold(), name.strip().casefold())
+
+
 def _overlay_key(recipe: Recipe) -> tuple[str, str]:
-    """Decision D6: a recipe is identified by its category plus its folded name."""
-    return (recipe.category.strip().casefold(), recipe.name.strip().casefold())
+    """The key of :func:`_key`, read off a row."""
+    return _key(recipe.name, recipe.category)
+
+
+def _card(recipe: Recipe, rows: Sequence[RecipeIngredient]) -> RecipeCard:
+    """Assemble a card from a row and its composition.
+
+    Shared by :meth:`RecipeService.card` and :meth:`RecipeService.create` so that what a
+    manager sees right after saving is assembled by the same code as what a bartender opens
+    tomorrow — a confirmation screen built separately is a screen that drifts.
+    """
+    return RecipeCard(
+        recipe_id=recipe.id,
+        name=recipe.name.strip(),
+        category=recipe.category,
+        is_library=recipe.venue_id is None,
+        glassware=_clean(recipe.glassware),
+        method=_clean(recipe.method),
+        ice=_clean(recipe.ice),
+        garnish=_clean(recipe.garnish),
+        instruction=_clean(recipe.instruction),
+        season_date=recipe.season_date,
+        yield_variants=recipe.yield_variants,
+        photo_file_id=recipe.photo_file_id,
+        ingredients=tuple(_ingredient_line(row) for row in sorted(rows, key=_ingredient_order)),
+    )
+
+
+def _ingredient_from_line(
+    raw: str,
+    index: int,
+    vocabulary: Mapping[str, Unit],
+) -> IngredientLine | None:
+    """One typed line, or `None` when there is no ingredient in it."""
+    line = _WHITESPACE.sub(" ", raw).strip()
+    if not line:
+        return None
+    separator = _SEPARATOR.search(line)
+    name = line if separator is None else line[: separator.start()].strip()
+    amount = "" if separator is None else line[separator.end() :].strip()
+    if not name:
+        return None
+    qty, unit, qty_text = _parse_amount(amount, vocabulary)
+    return IngredientLine(
+        name=name,
+        kind=classify_amount(qty, unit, qty_text),
+        qty=qty,
+        unit=unit,
+        qty_text=qty_text,
+        product_id=None,
+        prep_id=None,
+        order_index=index,
+    )
+
+
+def _parse_amount(
+    amount: str,
+    vocabulary: Mapping[str, Unit],
+) -> tuple[Decimal | None, Unit | None, str | None]:
+    """Split a typed amount into the three columns of decision D4.
+
+    Nothing is rewritten on the way: the only text that becomes a number is text that is
+    nothing but a number, and the only word that becomes a `Unit` is a word the vocabulary
+    already holds. Everything else is stored as it was typed.
+    """
+    if not amount:
+        return (None, None, None)
+    if _BARE_NUMBER.match(amount):
+        return (_decimal(amount), None, None)
+    measured = _NUMBER_AND_UNIT.match(amount)
+    if measured is not None:
+        unit = vocabulary.get(measured.group(2).casefold())
+        if unit is not None:
+            return (_decimal(measured.group(1)), unit, None)
+    return (None, None, amount)
+
+
+def _decimal(number: str) -> Decimal:
+    """A comma is a decimal point here: the venue writes "1,5" and means one and a half."""
+    return Decimal(number.replace(",", "."))
+
+
+def _ingredient_row(line: IngredientLine) -> dict[str, Any]:
+    """One parsed line as `RecipeIngredientRepository.replace_all` takes it."""
+    return {
+        "name": line.name,
+        "qty": line.qty,
+        "unit": line.unit,
+        "qty_text": line.qty_text,
+        "order_index": line.order_index,
+    }
 
 
 def _prefer_local(found: Sequence[Recipe]) -> list[Recipe]:
@@ -374,14 +713,21 @@ def _hit(recipe: Recipe) -> RecipeHit:
 
 
 __all__ = [
+    "CATEGORY_SCAN_LIMIT",
     "MAX_SEARCH_RESULTS",
+    "NO_UNITS",
     "AmountKind",
     "IngredientLine",
     "MissingRecipeAlert",
     "RecipeCard",
+    "RecipeDraft",
+    "RecipeError",
+    "RecipeExistsError",
     "RecipeHit",
+    "RecipeIncompleteError",
     "RecipeNotifier",
     "RecipeService",
     "SearchPage",
     "classify_amount",
+    "parse_ingredients",
 ]

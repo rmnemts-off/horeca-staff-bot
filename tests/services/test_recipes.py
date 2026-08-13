@@ -11,19 +11,26 @@ with nothing but a name and a list of ingredients.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
 import pytest
-from src.db.models import Base, Recipe, RecipeIngredient, Unit
-from src.db.repositories.recipes import RecipeRepo
+from src.bot.texts.recipes import unit_label
+from src.db.models import Base, MemberRole, Recipe, RecipeIngredient, Unit
+from src.db.repositories.recipes import PROTECTED_COLUMNS, RecipeRepo
+from src.services.access import AccessContext, PermissionDeniedError
+from src.services.audit import AuditAction, AuditEntity, AuditTrail
 from src.services.recipes import (
     MAX_SEARCH_RESULTS,
     AmountKind,
     MissingRecipeAlert,
+    RecipeDraft,
+    RecipeExistsError,
+    RecipeIncompleteError,
     RecipeService,
     classify_amount,
+    parse_ingredients,
 )
 
 # The recording session lives with the repository tests: one stand-in for `AsyncSession`,
@@ -36,6 +43,30 @@ USER_ID = 7
 
 COCKTAILS = "cocktails"
 COFFEE = "coffee"
+
+#: The unit vocabulary the wizard hands the service (decision B5): the very table the card
+#: is rendered with, read the other way round. The service ships without words of its own —
+#: `Unit` is fixed by code (TZ 4.4), its short forms are interface language and live in
+#: `src/bot/texts/`. Built from `unit_label` rather than retyped, so a test cannot claim the
+#: bot understands a word the card would never print.
+UNIT_WORDS = {unit_label(unit): unit for unit in Unit}
+
+ML = unit_label(Unit.ML)
+
+
+def context(role: MemberRole = MemberRole.MANAGER, *, venue_id: int = VENUE_ID) -> AccessContext:
+    return AccessContext(
+        user_id=USER_ID,
+        telegram_id=1000 + USER_ID,
+        venue_id=venue_id,
+        member_id=3,
+        role=role,
+        full_name="actor",
+    )
+
+
+MANAGER = context()
+STAFF = context(MemberRole.STAFF)
 
 
 # --------------------------------------------------------------------------------------
@@ -186,7 +217,26 @@ class FakeRecipes:
         return seen
 
     async def create(self, **fields: Any) -> Recipe:
-        raise NotImplementedError
+        """`RecipeRepo.create`: always a row of *this* venue.
+
+        The real one stamps `venue_id = self.venue_id` and drops the column from the fields
+        it was given (`PROTECTED_COLUMNS`), so a service cannot write into another venue or
+        into the shared library by passing one — the library is filled by BarPoint, not by a
+        bar. The fake keeps both halves, and everything it writes lands in the shared table.
+        """
+        columns = Recipe.__table__.c
+        writable = {
+            name: value
+            for name, value in fields.items()
+            if name in columns and name not in PROTECTED_COLUMNS
+        }
+        writable.setdefault("is_active", True)
+        recipe = Recipe(id=self._next_id(), venue_id=self.venue_id, **writable)
+        self.recipes.append(recipe)
+        return recipe
+
+    def _next_id(self) -> int:
+        return max((row.id for row in self.recipes), default=0) + 1
 
     async def update(self, recipe_id: int, **fields: Any) -> Recipe | None:
         raise NotImplementedError
@@ -247,12 +297,40 @@ class FakeIngredients:
         rows = [row for row in self.ingredients if row.recipe_id == recipe_id]
         return list(reversed(rows))
 
+    def _own_parent(self, recipe_id: int) -> Recipe | None:
+        """`for_parent()`, the strict join — the one the writes use.
+
+        `RecipeIngredientRepo.replace_all` deliberately does not use `library()`: a library
+        recipe is read-only until question C4 is answered, so its composition is not
+        rewritten from a venue either. `venue_id IS NULL` therefore fails here where it
+        passes in :meth:`_parent`, and so does another venue's row (TZ 3.3, decision D9).
+        """
+        recipe = next((row for row in self._recipes if row.id == recipe_id), None)
+        if recipe is None or recipe.venue_id != self.venue_id:
+            return None
+        return recipe
+
     async def replace_all(
         self,
         recipe_id: int,
         ingredients: Sequence[dict[str, Any]],
     ) -> Sequence[RecipeIngredient]:
-        raise NotImplementedError
+        """Rewrite the composition of one recipe of this venue, or write nothing at all."""
+        if self._own_parent(recipe_id) is None:
+            return []
+        # In place: the table object is shared with the neighbour's repository, the way the
+        # real `recipe_ingredients` is shared by every venue.
+        self.ingredients[:] = [row for row in self.ingredients if row.recipe_id != recipe_id]
+        rows: list[RecipeIngredient] = []
+        for index, ingredient in enumerate(ingredients):
+            fields = dict(ingredient)
+            fields.setdefault("order_index", index)
+            rows.append(RecipeIngredient(id=self._next_id(), recipe_id=recipe_id, **fields))
+            self.ingredients.append(rows[-1])
+        return rows
+
+    def _next_id(self) -> int:
+        return max((row.id for row in self.ingredients), default=0) + 1
 
 
 class FakeNotifier:
@@ -263,20 +341,50 @@ class FakeNotifier:
         self.missing.append(alert)
 
 
+class FakeAudit:
+    """`AuditSink`: the trail appends and never reads, so neither does this."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    async def record(
+        self,
+        *,
+        user_id: int | None,
+        entity: str,
+        entity_id: int | None,
+        action: str,
+        diff: dict[str, Any] | None = None,
+    ) -> None:
+        self.records.append(
+            {
+                "user_id": user_id,
+                "entity": entity,
+                "entity_id": entity_id,
+                "action": action,
+                "diff": diff,
+            }
+        )
+
+
 class Harness:
     def __init__(
         self,
         *,
         recipes: Sequence[Recipe] = (),
         ingredients: Sequence[RecipeIngredient] = (),
+        units: Mapping[str, Unit] = UNIT_WORDS,
     ) -> None:
         self.ingredients = FakeIngredients(ingredients)
         self.recipes = FakeRecipes(self.ingredients, recipes)
         self.notifier = FakeNotifier()
+        self.audit = FakeAudit()
         self.service = RecipeService(
             recipes=self.recipes,
             ingredients=self.ingredients,
             notifier=self.notifier,
+            units=units,
+            audit=AuditTrail(self.audit),
         )
 
 
@@ -781,3 +889,359 @@ async def test_reporting_nothing_tells_the_manager_nothing() -> None:
 
     assert await harness.service.report_missing(query="   ", reported_by=USER_ID) is None
     assert harness.notifier.missing == []
+
+
+# --------------------------------------------------------------------------------------
+# Creating a recipe through the interface (decision B5, plan task 30a)
+# --------------------------------------------------------------------------------------
+
+
+async def test_a_recipe_is_a_name_a_category_and_a_composition_and_nothing_else() -> None:
+    """The minimal form of decision B5, which is also the card of test 41 (TZ 8.1).
+
+    Glassware, method, ice, garnish and instruction are absent on most classic recipes, so a
+    form that insisted on them would keep the venue from entering the drink it has.
+    """
+    harness = Harness()
+
+    card = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="House Special", category=COCKTAILS, ingredients=[f"Rum — 45 {ML}"]),
+    )
+
+    assert card.name == "House Special"
+    assert card.category == COCKTAILS
+    assert card.is_library is False
+    assert card.has_serving_line is False
+    assert card.has_ingredients is True
+    assert [line.name for line in card.ingredients] == ["Rum"]
+
+
+async def test_what_was_saved_is_what_the_bartender_opens() -> None:
+    """The confirmation screen and the card are one structure, so they cannot drift."""
+    harness = Harness()
+
+    saved = await harness.service.create(
+        MANAGER,
+        RecipeDraft(
+            name="Mojito",
+            category=COCKTAILS,
+            glassware="highball",
+            method="build",
+            ice="crushed",
+            garnish="mint_sprig",
+            instruction="muddle_and_build",
+            ingredients=[f"White rum — 50 {ML}", "Soda — top"],
+        ),
+    )
+
+    assert await harness.service.card(saved.recipe_id) == saved
+    assert saved.has_serving_line is True
+    page = await harness.service.search("mojito")
+    assert [hit.recipe_id for hit in page.hits] == [saved.recipe_id]
+
+
+async def test_the_three_amount_branches_come_out_of_one_typed_composition() -> None:
+    """Decision D4, from the side the manager types it (TZ 7, three branches).
+
+    A measured amount, a bare number, and a unit that lives *inside* free text — the three
+    shapes the reference book actually contains. The third stays exactly as it was written:
+    nothing here rewrites what a venue typed.
+    """
+    lines = parse_ingredients(
+        "\n".join([f"Rum — 45 {ML}", "Mint — 45", f"Soda — top ( 100 {ML} )"]),
+        units=UNIT_WORDS,
+    )
+
+    assert [line.kind for line in lines] == [
+        AmountKind.MEASURED,
+        AmountKind.NUMERIC,
+        AmountKind.TEXT,
+    ]
+    assert (lines[0].qty, lines[0].unit, lines[0].qty_text) == (Decimal("45"), Unit.ML, None)
+    assert (lines[1].qty, lines[1].unit, lines[1].qty_text) == (Decimal("45"), None, None)
+    assert (lines[2].qty, lines[2].unit, lines[2].qty_text) == (None, None, f"top ( 100 {ML} )")
+    assert [line.order_index for line in lines] == [0, 1, 2]
+
+
+async def test_the_typed_composition_reaches_the_card_in_the_order_it_was_written() -> None:
+    harness = Harness()
+
+    card = await harness.service.create(
+        MANAGER,
+        RecipeDraft(
+            name="Mojito",
+            category=COCKTAILS,
+            ingredients=[f"White rum — 50 {ML}", "Mint — 8", "Soda — top"],
+        ),
+    )
+
+    assert [(line.name, line.kind) for line in card.ingredients] == [
+        ("White rum", AmountKind.MEASURED),
+        ("Mint", AmountKind.NUMERIC),
+        ("Soda", AmountKind.TEXT),
+    ]
+
+
+def test_a_decimal_amount_is_a_number_however_it_was_punctuated() -> None:
+    lines = parse_ingredients(f"Syrup — 1,5 {ML}\nCordial — 2.5", units=UNIT_WORDS)
+
+    assert (lines[0].qty, lines[0].unit) == (Decimal("1.5"), Unit.ML)
+    assert (lines[1].qty, lines[1].kind) == (Decimal("2.5"), AmountKind.NUMERIC)
+
+
+def test_an_amount_whose_unit_is_unknown_is_kept_as_it_was_typed() -> None:
+    """Decision D4: units are not normalised, and never invented.
+
+    The service ships without a vocabulary — the words are interface language and live in
+    `src/bot/texts/`. Without one, "45 ml" is text, and text is stored verbatim; a unit
+    guessed here would be a number the venue never wrote.
+    """
+    lines = parse_ingredients(f"Rum — 45 {ML}\nSugar — 2 spoons")
+
+    assert lines[0].kind is AmountKind.TEXT
+    assert lines[0].qty_text == f"45 {ML}"
+    assert lines[1].qty_text == "2 spoons"
+    assert all(line.unit is None for line in lines)
+
+
+def test_a_line_without_a_dash_is_an_ingredient_without_an_amount() -> None:
+    """Still a valid line: TZ 5.5 names ingredients that carry no quantity at all."""
+    lines = parse_ingredients("Angostura")
+
+    assert [(line.name, line.kind) for line in lines] == [("Angostura", AmountKind.ABSENT)]
+
+
+def test_a_hyphen_inside_a_name_does_not_split_the_line() -> None:
+    """A hyphen is a letter of a compound name; only a dash standing apart separates."""
+    lines = parse_ingredients("Coca-Cola\nCold-brew — top")
+
+    assert [line.name for line in lines] == ["Coca-Cola", "Cold-brew"]
+    assert [line.kind for line in lines] == [AmountKind.ABSENT, AmountKind.TEXT]
+
+
+def test_a_range_survives_the_split_whole() -> None:
+    """The first dash separates, so the second one stays inside the amount."""
+    lines = parse_ingredients("Rum — 40 - 50")
+
+    assert lines[0].name == "Rum"
+    assert lines[0].qty_text == "40 - 50"
+
+
+def test_blank_and_nameless_lines_are_dropped() -> None:
+    """An ingredient with no name is not an ingredient, and an empty line is not a row."""
+    lines = parse_ingredients("Rum — 45\n\n   \n— 30\nSoda")
+
+    assert [line.name for line in lines] == ["Rum", "Soda"]
+    assert [line.order_index for line in lines] == [0, 1]
+
+
+async def test_the_composition_may_arrive_as_one_message_or_as_separate_lines() -> None:
+    """The wizard hands over what it was sent; splitting it first changes nothing."""
+    harness = Harness()
+
+    typed = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="One", category=COCKTAILS, ingredients=["Rum — 45\nSoda — top"]),
+    )
+    split = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Two", category=COCKTAILS, ingredients=["Rum — 45", "Soda — top"]),
+    )
+
+    assert [(line.name, line.qty, line.qty_text) for line in typed.ingredients] == [
+        (line.name, line.qty, line.qty_text) for line in split.ingredients
+    ]
+
+
+async def test_a_second_recipe_with_the_same_key_is_refused() -> None:
+    """Decision D6, the whole point of it: the first card is not silently overwritten."""
+    harness = Harness()
+    first = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Americano", category=COCKTAILS, ingredients=["Campari — 30"]),
+    )
+
+    with pytest.raises(RecipeExistsError) as refusal:
+        await harness.service.create(
+            MANAGER,
+            RecipeDraft(name="  aMERICANO  ", category=COCKTAILS, ingredients=["Campari — 30"]),
+        )
+
+    # The caller can offer the card that is already there instead of a bare refusal.
+    assert refusal.value.recipe_id == first.recipe_id
+    assert len(harness.recipes.recipes) == 1
+    assert [row.name for row in harness.ingredients.ingredients] == ["Campari"]
+
+
+async def test_the_same_name_in_another_category_is_another_recipe() -> None:
+    """Decision D6 the other way round: `Americano` is legitimately a cocktail and a coffee."""
+    harness = Harness()
+
+    cocktail = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Americano", category=COCKTAILS, ingredients=["Campari — 30"]),
+    )
+    coffee = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Americano", category=COFFEE, ingredients=["Espresso — 30"]),
+    )
+
+    assert cocktail.recipe_id != coffee.recipe_id
+    page = await harness.service.search("americano")
+    assert sorted(hit.category for hit in page.hits) == sorted([COCKTAILS, COFFEE])
+
+
+async def test_a_library_twin_does_not_stop_a_venue_from_typing_its_own() -> None:
+    """TZ 3.3: the unique key is per venue, and `venue_id IS NULL` is its own scope.
+
+    Refusing here would make the overlay of `_prefer_local` unreachable — a venue could
+    never keep its own version of a shared recipe.
+    """
+    harness = Harness(recipes=[make_recipe(1, name="Mojito", venue_id=None)])
+
+    own = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Mojito", category=COCKTAILS, ingredients=[f"White rum — 50 {ML}"]),
+    )
+
+    assert own.is_library is False
+    page = await harness.service.search("mojito")
+    assert [hit.recipe_id for hit in page.hits] == [own.recipe_id]
+
+
+async def test_a_neighbours_recipe_does_not_occupy_the_key_here() -> None:
+    """The venue predicate on the write path (TZ 3.3, TZ 9, acceptance 11.3).
+
+    The bar next door genuinely has a Mojito, in the same shared table. Its row must neither
+    block this venue's own card nor be handed back as the twin — and its composition must
+    stay where it is.
+    """
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito", venue_id=OTHER_VENUE_ID)],
+        ingredients=[make_ingredient(1, 1, name="foreign_rum")],
+    )
+
+    own = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Mojito", category=COCKTAILS, ingredients=["Light rum — 50"]),
+    )
+
+    assert own.recipe_id != 1
+    assert [line.name for line in own.ingredients] == ["Light rum"]
+    neighbour = harness.recipes.neighbour(OTHER_VENUE_ID).ingredients
+    assert [row.name for row in await neighbour.list_for_recipe(1)] == ["foreign_rum"]
+
+
+async def test_the_composition_of_a_foreign_or_library_recipe_is_not_rewritable() -> None:
+    """`replace_all` joins with `for_parent()`, not `library()` (decision D9, question C4).
+
+    A card that is readable is not therefore writable: the library is BarPoint's until C4 is
+    answered, and the neighbour's is never anybody's business. Both refusals write nothing
+    *and* delete nothing — a rewrite that emptied the row before checking would be worse
+    than one that changed it.
+    """
+    harness = Harness(
+        recipes=[
+            make_recipe(1, name="Mojito", venue_id=OTHER_VENUE_ID),
+            make_recipe(2, name="Highball", venue_id=None),
+        ],
+        ingredients=[
+            make_ingredient(1, 1, name="foreign_rum"),
+            make_ingredient(2, 2, name="library_soda"),
+        ],
+    )
+
+    assert list(await harness.ingredients.replace_all(1, [{"name": "intruder"}])) == []
+    assert list(await harness.ingredients.replace_all(2, [{"name": "intruder"}])) == []
+    assert [row.name for row in harness.ingredients.ingredients] == ["foreign_rum", "library_soda"]
+
+    # Hidden by the predicate, not by an absence: its own venue rewrites the row normally.
+    neighbour = harness.recipes.neighbour(OTHER_VENUE_ID).ingredients
+    written = await neighbour.replace_all(1, [{"name": "own_rum"}])
+    assert [row.name for row in written] == ["own_rum"]
+
+
+async def test_staff_cannot_create_a_recipe() -> None:
+    """TZ 5.8: the reference data of a venue is the manager's (TZ 2, TZ 9)."""
+    harness = Harness()
+
+    with pytest.raises(PermissionDeniedError):
+        await harness.service.create(
+            STAFF,
+            RecipeDraft(name="House Special", category=COCKTAILS, ingredients=["Rum — 45"]),
+        )
+
+    assert harness.recipes.recipes == []
+    assert harness.audit.records == []
+
+
+@pytest.mark.parametrize(("name", "category"), [("   ", COCKTAILS), ("Mojito", "  ")])
+async def test_a_recipe_without_a_name_or_a_category_is_refused(name: str, category: str) -> None:
+    """The category is half the key of decision D6, so it is required with the name."""
+    harness = Harness()
+
+    with pytest.raises(RecipeIncompleteError):
+        await harness.service.create(MANAGER, RecipeDraft(name=name, category=category))
+
+    assert harness.recipes.recipes == []
+
+
+async def test_the_creation_reaches_the_audit_log() -> None:
+    """TZ 2: every data change is recorded with the actor, the object and the difference."""
+    harness = Harness()
+
+    card = await harness.service.create(
+        MANAGER,
+        RecipeDraft(
+            name="Mojito",
+            category=COCKTAILS,
+            glassware="highball",
+            ingredients=[f"White rum — 50 {ML}"],
+        ),
+    )
+
+    assert len(harness.audit.records) == 1
+    record = harness.audit.records[0]
+    assert record["user_id"] == MANAGER.user_id
+    assert record["entity"] == AuditEntity.RECIPE
+    assert record["entity_id"] == card.recipe_id
+    assert record["action"] == AuditAction.CREATE
+    diff = record["diff"]
+    assert diff is not None
+    assert diff["name"]["to"] == "Mojito"
+    assert diff["category"]["to"] == COCKTAILS
+    assert diff["glassware"]["to"] == "highball"
+    # Fields the manager left empty did not move, so they are not in the diff.
+    assert "ice" not in diff
+
+
+async def test_a_service_built_without_an_audit_trail_still_creates() -> None:
+    """`SILENT` by default, so a caller that has no audit repository yet is not broken."""
+    harness = Harness()
+    service = RecipeService(
+        recipes=harness.recipes,
+        ingredients=harness.ingredients,
+        notifier=harness.notifier,
+    )
+
+    card = await service.create(
+        MANAGER,
+        RecipeDraft(name="House Special", category=COCKTAILS, ingredients=["Rum — 45"]),
+    )
+
+    assert card.name == "House Special"
+    assert harness.audit.records == []
+
+
+async def test_a_category_is_offered_only_after_a_recipe_has_used_it() -> None:
+    """TZ 8.1 and principle 6: no category ships with the product, the venue names them."""
+    harness = Harness()
+    assert await harness.service.categories() == ()
+
+    await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Americano", category=COFFEE, ingredients=["Espresso — 30"]),
+    )
+
+    assert await harness.service.categories() == (COFFEE,)
