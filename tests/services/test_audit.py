@@ -214,15 +214,15 @@ async def test_deleted_records_what_the_row_was(
 ) -> None:
     """The vanished values are the only thing left to record after the row is gone.
 
-    They land under `AFTER_KEY`: `deleted` builds the diff as `changed_fields({}, before)`,
-    the same one-sided shape `created` produces. Asserted as the code behaves — the choice
-    is noted in the report, not silently rewritten here.
+    They land under `BEFORE_KEY`, with nothing after them, and that is the point of the
+    assertion: filed the other way round a deletion reads exactly like a creation, and the
+    one column somebody reading a deletion wants — what it *was* — is the empty one.
     """
     await trail.deleted(actor, AuditEntity.CHECKLIST_ITEM, 8, before={"title": "Fridge"})
 
     entry = only(sink)
     assert entry.action == AuditAction.DELETE == "delete"
-    assert entry.diff == {"title": {BEFORE_KEY: None, AFTER_KEY: "Fridge"}}
+    assert entry.diff == {"title": {BEFORE_KEY: "Fridge", AFTER_KEY: None}}
 
 
 async def test_deleted_without_a_snapshot_records_the_event_alone(
@@ -327,12 +327,44 @@ async def test_set_active_names_the_event_instead_of_calling_it_an_update(
 ) -> None:
     """TZ 5.1: an employee is switched off, never deleted, and the log is asked exactly
     "who switched Ivanov off" — a row saying `update` does not answer that."""
-    await trail.set_active(actor, AuditEntity.MEMBER, 11, is_active=is_active)
+    recorded = await trail.set_active(
+        actor,
+        AuditEntity.MEMBER,
+        11,
+        was_active=not is_active,
+        is_active=is_active,
+    )
 
+    assert recorded is True
     entry = only(sink)
     assert entry.action == action
     assert entry.action != AuditAction.UPDATE
     assert entry.diff == {"is_active": {BEFORE_KEY: not is_active, AFTER_KEY: is_active}}
+
+
+@pytest.mark.parametrize("state", [True, False])
+async def test_set_active_writes_nothing_when_the_state_was_already_that(
+    trail: AuditTrail,
+    sink: FakeAuditLog,
+    actor: AccessContext,
+    state: bool,
+) -> None:
+    """A second press on a keyboard nobody redrew must not invent a moment.
+
+    "Deactivate" tapped on somebody already deactivated used to file a record saying access
+    was withdrawn just then — and that record is the only evidence there is about when it
+    happened, because the row itself keeps no such field (TZ 5.1 keeps the row unchanged).
+    """
+    recorded = await trail.set_active(
+        actor,
+        AuditEntity.MEMBER,
+        11,
+        was_active=state,
+        is_active=state,
+    )
+
+    assert recorded is False
+    assert sink.entries == []
 
 
 # --------------------------------------------------------------------------------------
@@ -362,7 +394,7 @@ async def test_every_method_records_the_same_actor(
     await trail.updated(
         actor, AuditEntity.MEMBER, 11, before={"position": None}, after={"position": "bar"}
     )
-    await trail.set_active(actor, AuditEntity.MEMBER, 11, is_active=False)
+    await trail.set_active(actor, AuditEntity.MEMBER, 11, was_active=True, is_active=False)
     await trail.deleted(actor, AuditEntity.INVITE_CODE, 4, before={"code": "1-ABCDEFGH"})
 
     assert [entry.user_id for entry in sink.entries] == [USER_ID] * 4
@@ -388,7 +420,7 @@ async def test_silent_records_nothing_and_raises_nothing(actor: AccessContext) -
 
     await SILENT.created(actor, AuditEntity.VENUE, None, after={"title": "Invasion"})
     await SILENT.deleted(actor, AuditEntity.VENUE, 1, before={"title": "Invasion"})
-    await SILENT.set_active(actor, AuditEntity.MEMBER, 11, is_active=False)
+    await SILENT.set_active(actor, AuditEntity.MEMBER, 11, was_active=True, is_active=False)
     recorded = await SILENT.updated(
         actor, AuditEntity.MEMBER, 11, before={"position": "bar"}, after={"position": "hall"}
     )
@@ -520,7 +552,7 @@ async def test_the_venue_comes_from_the_sink_and_never_from_the_actor(
         position=None,
     )
 
-    await trail.set_active(stranger, AuditEntity.MEMBER, 11, is_active=False)
+    await trail.set_active(stranger, AuditEntity.MEMBER, 11, was_active=True, is_active=False)
 
     assert only(sink).venue_id == VENUE_ID
     assert FakeAuditLog(store, OTHER_VENUE_ID).entries == []

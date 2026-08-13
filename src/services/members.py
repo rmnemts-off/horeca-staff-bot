@@ -247,7 +247,8 @@ class MemberService:
         *,
         is_active: bool,
     ) -> RosterEntry:
-        await self._require_member(actor, member_id)
+        current = await self._require_member(actor, member_id)
+        was_active = current.is_active
         member = await self.repositories.members(actor.venue_id).set_active(
             member_id,
             is_active=is_active,
@@ -256,7 +257,13 @@ class MemberService:
             raise MemberNotFoundError(member_id, actor.venue_id)
         # TZ 5.1 keeps the row, so the row itself records nothing about the moment access
         # stopped. The log is the only place that fact exists (TZ 2).
-        await self._audit.set_active(actor, AuditEntity.MEMBER, member.id, is_active=is_active)
+        await self._audit.set_active(
+            actor,
+            AuditEntity.MEMBER,
+            member.id,
+            was_active=was_active,
+            is_active=is_active,
+        )
         return RosterEntry(member=member, user=await self.repositories.users.get(member.user_id))
 
     async def _update(

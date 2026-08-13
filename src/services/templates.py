@@ -689,7 +689,11 @@ class TemplateService:
 
         await self._templates.deactivate(template.id)
         await self._audit.set_active(
-            actor, AuditEntity.CHECKLIST_TEMPLATE, template.id, is_active=False
+            actor,
+            AuditEntity.CHECKLIST_TEMPLATE,
+            template.id,
+            was_active=True,
+            is_active=False,
         )
         fork = await self._templates.create(
             checklist_type=template.type,

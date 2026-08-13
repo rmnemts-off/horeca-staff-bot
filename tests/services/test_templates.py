@@ -616,7 +616,9 @@ async def test_deleting_the_last_item_of_a_group_removes_the_group(
 
     assert [group.name for group in result.view.groups] == ["Station", "Glassware"]
     assert kept.item_id in [item.item_id for item in result.view.items]
-    assert audit.of("checklist_items", "delete")[0]["diff"]["text"]["to"] == "syrups"
+    # A deletion files what the row *was* under "from"; "to" is empty, which is what
+    # tells a deletion apart from a creation in the log (src/services/audit.py).
+    assert audit.of("checklist_items", "delete")[0]["diff"]["text"]["from"] == "syrups"
 
 
 async def test_rename_group_renames_every_item_of_it(repos: FakeTemplates) -> None:

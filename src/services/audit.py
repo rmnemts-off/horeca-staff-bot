@@ -40,7 +40,7 @@ import enum
 from collections.abc import Mapping
 from typing import Any, Final, Protocol
 
-from src.db.repositories.audit import changed_fields
+from src.db.repositories.audit import AFTER_KEY, BEFORE_KEY, as_json, changed_fields
 from src.services.access import AccessContext
 
 
@@ -159,9 +159,22 @@ class AuditTrail:
         *,
         before: Mapping[str, Any] | None = None,
     ) -> None:
-        """A row went away. The diff carries what it was, since nothing else will."""
-        diff = None if before is None else changed_fields({}, before)
-        await self._write(actor, entity, entity_id, AuditAction.DELETE, diff)
+        """A row went away. The diff carries what it was, since nothing else will.
+
+        Built by hand rather than through `changed_fields`, and the reason is the shape of
+        the record: that helper walks the keys of *after*, so the only way to hand it a
+        deletion is `changed_fields({}, before)` — which files every disappeared value
+        under `to` and leaves `from` empty. A delete would then be indistinguishable from a
+        create in the log, and the one column a reader of a deletion actually wants ("what
+        was it") would be the blank one.
+        """
+        if before is None:
+            await self._write(actor, entity, entity_id, AuditAction.DELETE, None)
+            return
+        diff = {
+            field: {BEFORE_KEY: as_json(value), AFTER_KEY: None} for field, value in before.items()
+        }
+        await self._write(actor, entity, entity_id, AuditAction.DELETE, diff or None)
 
     async def set_active(
         self,
@@ -169,17 +182,31 @@ class AuditTrail:
         entity: AuditEntity,
         entity_id: int | None,
         *,
+        was_active: bool,
         is_active: bool,
-    ) -> None:
-        """TZ 5.1: switched off keeping the history, or switched back on."""
+    ) -> bool:
+        """TZ 5.1: switched off keeping the history, or switched back on.
+
+        `was_active` is the state actually read from the row and not `not is_active`, which
+        is what this method used to assume. The assumption is wrong exactly where it costs
+        something: pressing "deactivate" on somebody who is already deactivated — an
+        ordinary double tap on a keyboard that has not been redrawn — would file a record
+        saying access was withdrawn at that moment, and that record is the only evidence
+        anybody has about when it happened (the row itself keeps no such field). So the
+        no-op is recognised here, the same way :meth:`updated` recognises it, and `False`
+        says nothing was written.
+        """
+        if was_active == is_active:
+            return False
         action = AuditAction.ACTIVATE if is_active else AuditAction.DEACTIVATE
         await self._write(
             actor,
             entity,
             entity_id,
             action,
-            changed_fields({"is_active": not is_active}, {"is_active": is_active}),
+            changed_fields({"is_active": was_active}, {"is_active": is_active}),
         )
+        return True
 
     async def _write(
         self,
