@@ -75,11 +75,14 @@ from src.db.repositories.shifts import ShiftRepo
 from src.db.repositories.users import UserRepo
 from src.db.repositories.venues import VenueRepo, VenueSettingsRepo
 from src.services.access import AccessRepositories, AccessService
+from src.services.audit import AuditSink, AuditTrail
 from src.services.checklists import ChecklistService
 from src.services.members import MemberRepositories, MemberService
 from src.services.notifications import NotificationService
 from src.services.recipes import RecipeService
 from src.services.shifts import ShiftService
+from src.services.templates import TemplateService
+from src.services.venues import VenueCreationRepositories, VenueService
 
 from tests.repo_scan import REPOSITORIES_DIR, SRC_DIR, python_files, relative
 
@@ -231,14 +234,16 @@ def test_every_repository_class_is_bound_to_a_protocol() -> None:
 
 
 class RepositoryBundle:
-    """`AccessRepositories` and `MemberRepositories`, built on the real classes.
+    """`AccessRepositories`, `MemberRepositories` and `VenueCreationRepositories`.
 
-    Those two services take their repositories through a small protocol instead of one by
+    Those three services take their repositories through a small protocol instead of one by
     one: `users` and `venues` are global, while `venue_members` and `invite_codes` are
     venue-scoped and therefore arrive as factories — the venue is part of the repository
     object (TZ 3.3), and access is the code that works out *which* venue in the first
-    place. The return annotations below are the protocol types, so every `return` here is
-    one more assignment mypy checks.
+    place. `VenueService` is the sharpest case of the same shape: it runs before the venue
+    it is creating exists, so nothing can be scoped for it in advance (decision A3). The
+    return annotations below are the protocol types, so every `return` here is one more
+    assignment mypy checks.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -258,15 +263,26 @@ class RepositoryBundle:
     def invites(self, venue_id: int) -> InviteCodeRepository:
         return InviteCodeRepo(self._session, venue_id)
 
+    def settings(self, venue_id: int) -> VenueSettingsRepository:
+        return VenueSettingsRepo(self._session, venue_id)
+
+    def templates(self, venue_id: int) -> ChecklistTemplateRepository:
+        return ChecklistTemplateRepo(self._session, venue_id)
+
+    def audit(self, venue_id: int) -> AuditSink:
+        return AuditLogRepo(self._session, venue_id)
+
 
 @dataclass(frozen=True, slots=True)
 class Services:
     """Every service of `src/services/`, as the bot layer will hold them."""
 
     access: AccessService
+    venues: VenueService
     members: MemberService
     notifications: NotificationService
     checklists: ChecklistService
+    templates: TemplateService
     recipes: RecipeService
     shifts: ShiftService
 
@@ -283,7 +299,13 @@ def build_services(session: AsyncSession) -> Services:
     bundle = RepositoryBundle(session)
     access_repositories: AccessRepositories = bundle
     member_repositories: MemberRepositories = bundle
+    # `VenueService` runs before its venue exists (decision A3), so it takes the same
+    # factory shape as the two above rather than a repository already scoped to a venue.
+    venue_repositories: VenueCreationRepositories = bundle
 
+    # One trail per venue: `audit_log.venue_id` is the repository's own column, so the
+    # services below cannot record into another venue even by mistake (TZ 2, 3.3).
+    trail = AuditTrail(AuditLogRepo(session, VENUE_ID))
     access = AccessService(access_repositories)
     notifications = NotificationService(
         venue_id=VENUE_ID,
@@ -295,7 +317,8 @@ def build_services(session: AsyncSession) -> Services:
     )
     return Services(
         access=access,
-        members=MemberService(member_repositories),
+        venues=VenueService(venue_repositories),
+        members=MemberService(member_repositories, audit=trail),
         notifications=notifications,
         checklists=ChecklistService(
             templates=ChecklistTemplateRepo(session, VENUE_ID),
@@ -304,10 +327,16 @@ def build_services(session: AsyncSession) -> Services:
             run_items=ChecklistRunItemRepo(session, VENUE_ID),
             notifier=notifications,
         ),
+        templates=TemplateService(
+            templates=ChecklistTemplateRepo(session, VENUE_ID),
+            items=ChecklistItemRepo(session, VENUE_ID),
+            audit=trail,
+        ),
         recipes=RecipeService(
             recipes=RecipeRepo(session, VENUE_ID),
             ingredients=RecipeIngredientRepo(session, VENUE_ID),
             notifier=notifications,
+            audit=trail,
         ),
         shifts=ShiftService(
             venue_id=VENUE_ID,
@@ -316,6 +345,7 @@ def build_services(session: AsyncSession) -> Services:
             users=UserRepo(session),
             members=VenueMemberRepo(session, VENUE_ID),
             notifier=notifications,
+            audit=trail,
         ),
     )
 

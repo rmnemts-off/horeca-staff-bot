@@ -48,6 +48,7 @@ from src.services.access import (
     require_venue,
     role_rank,
 )
+from src.services.audit import SILENT, AuditEntity, AuditTrail, snapshot
 
 
 class MemberError(AccessError):
@@ -114,10 +115,23 @@ class MemberRepositories(Protocol):
 
 
 class MemberService:
-    """Roster of one venue: read it, and change who is in it (TZ 5.8)."""
+    """Roster of one venue: read it, and change who is in it (TZ 5.8).
 
-    def __init__(self, repositories: MemberRepositories) -> None:
+    `audit` defaults to :data:`~src.services.audit.SILENT` so that a test may build the
+    service with nothing behind it; the composition root always hands in a real one, and
+    TZ 2 is why — "who switched Ivanov off and when" is the question the log is asked, and
+    a deactivation is the one change of this service that is never visible anywhere else
+    (the row stays exactly where it was, TZ 5.1).
+    """
+
+    def __init__(
+        self,
+        repositories: MemberRepositories,
+        *,
+        audit: AuditTrail = SILENT,
+    ) -> None:
         self.repositories = repositories
+        self._audit = audit
 
     # -- reading ------------------------------------------------------------------------
 
@@ -206,7 +220,15 @@ class MemberService:
         cleaned = full_name.strip()
         if not cleaned:
             raise MemberError("the full name cannot be empty")
+        before = await self.repositories.users.get(member.user_id)
         user = await self.repositories.users.update(member.user_id, full_name=cleaned)
+        await self._audit.updated(
+            actor,
+            AuditEntity.MEMBER,
+            member.id,
+            before=snapshot(before, "full_name"),
+            after={"full_name": cleaned},
+        )
         return RosterEntry(member=member, user=user)
 
     # -- internals ----------------------------------------------------------------------
@@ -232,6 +254,9 @@ class MemberService:
         )
         if member is None:
             raise MemberNotFoundError(member_id, actor.venue_id)
+        # TZ 5.1 keeps the row, so the row itself records nothing about the moment access
+        # stopped. The log is the only place that fact exists (TZ 2).
+        await self._audit.set_active(actor, AuditEntity.MEMBER, member.id, is_active=is_active)
         return RosterEntry(member=member, user=await self.repositories.users.get(member.user_id))
 
     async def _update(
@@ -240,9 +265,17 @@ class MemberService:
         member_id: int,
         **fields: object,
     ) -> RosterEntry:
+        before = await self.repositories.members(actor.venue_id).get(member_id)
         member = await self.repositories.members(actor.venue_id).update(member_id, **fields)
         if member is None:
             raise MemberNotFoundError(member_id, actor.venue_id)
+        await self._audit.updated(
+            actor,
+            AuditEntity.MEMBER,
+            member.id,
+            before=snapshot(before, *fields),
+            after=dict(fields),
+        )
         return RosterEntry(member=member, user=await self.repositories.users.get(member.user_id))
 
     async def _entries(self, members: Iterable[VenueMember]) -> tuple[RosterEntry, ...]:

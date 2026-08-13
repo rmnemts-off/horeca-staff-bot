@@ -1,7 +1,7 @@
 """The root of the management section (TZ 5.2, 5.8; plan task 26).
 
 Owner: plan task 26. One screen — the five blocks of TZ 5.8 as buttons — plus the caption
-of «⚙️ Управление» on the reply keyboard. Each block itself lives in its own `admin_*`
+of the management button on the reply keyboard. Each block itself lives in its own `admin_*`
 module and answers its own `OpenAdmin` payload; this module only draws the board.
 
 Empty until then; see `src/bot/handlers/__init__.py` for the order of the tree.

@@ -67,11 +67,14 @@ from src.db.repositories.users import UserRepo
 from src.db.repositories.venues import VenueRepo, VenueSettingsRepo
 from src.db.session import session_scope
 from src.services.access import AccessService
+from src.services.audit import AuditSink, AuditTrail
 from src.services.checklists import ChecklistService, ReopenableRunRepository
 from src.services.members import MemberService
 from src.services.notifications import NotificationService
 from src.services.recipes import RecipeService
 from src.services.shifts import ShiftService
+from src.services.templates import TemplateService
+from src.services.venues import VenueService
 
 #: Handler-context key of the container itself. Only the middlewares of this package read
 #: it; a handler that needs something from it takes `services` instead.
@@ -82,6 +85,10 @@ ACCESS_KEY: Final = "access"
 
 #: Handler-context key of the venue's service bundle, set by the venue middleware.
 SERVICES_KEY: Final = "services"
+
+#: Handler-context key of `VenueService`. Like `AccessService`, it exists before a venue
+#: does: the wizard of decision A3 is run by somebody who is not yet a member of anything.
+VENUE_WIZARD_KEY: Final = "venue_wizard"
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 Sessions = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -120,6 +127,7 @@ class VenueServices:
     repositories: VenueRepositories
     members: MemberService
     checklists: ChecklistService
+    templates: TemplateService
     recipes: RecipeService
     shifts: ShiftService
     notifications: NotificationService
@@ -130,11 +138,12 @@ class VenueServices:
 
 
 class RepositoryBundle:
-    """`AccessRepositories` and `MemberRepositories` over one session.
+    """`AccessRepositories`, `MemberRepositories` and `VenueCreationRepositories`.
 
-    Those two services are the exception documented in `src/services/access.py`: they work
+    Those three services are the exception documented in `src/services/access.py`: they work
     out *which* venue in the first place, so they take factories rather than a repository
-    already scoped to one.
+    already scoped to one. `VenueService` is the sharpest case — it runs before the venue it
+    is creating exists, so there is no scoped repository to hand it (decision A3).
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -154,6 +163,15 @@ class RepositoryBundle:
     def invites(self, venue_id: int) -> InviteCodeRepository:
         return InviteCodeRepo(self._session, venue_id)
 
+    def settings(self, venue_id: int) -> VenueSettingsRepository:
+        return VenueSettingsRepo(self._session, venue_id)
+
+    def templates(self, venue_id: int) -> ChecklistTemplateRepository:
+        return ChecklistTemplateRepo(self._session, venue_id)
+
+    def audit(self, venue_id: int) -> AuditSink:
+        return AuditLogRepo(self._session, venue_id)
+
 
 class Container:
     """Everything one update may need, over one session and one transaction."""
@@ -162,6 +180,9 @@ class Container:
         self._session = session
         self._bundle = RepositoryBundle(session)
         self.access = AccessService(self._bundle, bootstrap_owner_ids=bootstrap_owner_ids)
+        # Next to `access`, and for the same reason: the wizard of decision A3 runs for a
+        # person who belongs to no venue at all, so nothing about it can be venue-scoped.
+        self.venue_wizard = VenueService(self._bundle)
 
     @property
     def users(self) -> UserRepository:
@@ -199,6 +220,10 @@ class Container:
         (plan, tasks 16 and 24).
         """
         repositories = self.repositories_for(venue.id)
+        # One trail per update, built around this venue: `audit_log.venue_id` is the
+        # repository's own column, so a service cannot record into the wrong venue even by
+        # mistake (TZ 2, 3.3).
+        trail = AuditTrail(repositories.audit)
         notifications = NotificationService(
             venue_id=venue.id,
             venues=repositories.venues,
@@ -210,7 +235,7 @@ class Container:
         return VenueServices(
             venue=venue,
             repositories=repositories,
-            members=MemberService(self._bundle),
+            members=MemberService(self._bundle, audit=trail),
             checklists=ChecklistService(
                 templates=repositories.templates,
                 items=repositories.items,
@@ -218,10 +243,16 @@ class Container:
                 run_items=repositories.run_items,
                 notifier=notifications,
             ),
+            templates=TemplateService(
+                templates=repositories.templates,
+                items=repositories.items,
+                audit=trail,
+            ),
             recipes=RecipeService(
                 recipes=repositories.recipes,
                 ingredients=repositories.ingredients,
                 notifier=notifications,
+                audit=trail,
             ),
             shifts=ShiftService(
                 venue_id=venue.id,
@@ -230,6 +261,7 @@ class Container:
                 users=repositories.users,
                 members=repositories.members,
                 notifier=notifications,
+                audit=trail,
             ),
             notifications=notifications,
         )
@@ -257,6 +289,7 @@ class ServicesMiddleware(BaseMiddleware):
             container = Container(session, bootstrap_owner_ids=self._bootstrap_owner_ids)
             data[CONTAINER_KEY] = container
             data[ACCESS_KEY] = container.access
+            data[VENUE_WIZARD_KEY] = container.venue_wizard
             return await handler(event, data)
 
 
@@ -276,6 +309,7 @@ __all__ = [
     "ACCESS_KEY",
     "CONTAINER_KEY",
     "SERVICES_KEY",
+    "VENUE_WIZARD_KEY",
     "Container",
     "RepositoryBundle",
     "ServicesMiddleware",

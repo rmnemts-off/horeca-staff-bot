@@ -55,7 +55,7 @@ import enum
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Protocol
+from typing import Final, Protocol
 from zoneinfo import ZoneInfo
 
 from src.db.models import Shift, ShiftSource, ShiftStatus
@@ -71,11 +71,25 @@ from src.services.access import (
     require_self_or_manager,
     require_venue,
 )
+from src.services.audit import SILENT, AuditEntity, AuditTrail, snapshot
 from src.services.timezones import ensure_utc, local_date, shift_window, venue_timezone
 
 # --------------------------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------------------------
+
+#: The columns an audit record of a whole shift carries (TZ 2). Spelled out rather than
+#: dumped off the row: `created_at`, `created_by` and the primary key are not changes, and
+#: a diff that repeats them buries the two fields a manager actually looks for.
+_AUDITED_SHIFT_FIELDS: Final = (
+    "user_id",
+    "shift_date",
+    "start_time",
+    "end_time",
+    "is_opener",
+    "is_closer",
+    "status",
+)
 
 #: TZ 5.3: the schedule screen lists the employee's own shifts two weeks ahead, today
 #: included.
@@ -381,6 +395,7 @@ class ShiftService:
         users: UserRepository,
         members: VenueMemberRepository,
         notifier: ShiftNotifier,
+        audit: AuditTrail = SILENT,
     ) -> None:
         self._venue_id = venue_id
         self._tz = timezone if isinstance(timezone, ZoneInfo) else venue_timezone(timezone)
@@ -391,6 +406,9 @@ class ShiftService:
         # `users.full_name` is a global column and a person may work in several venues.
         self._members = members
         self._notifier = notifier
+        # TZ 2: who put whom on which shift. Defaults to silence so a test may build the
+        # service with nothing behind it; the composition root always hands in a real one.
+        self._audit = audit
 
     @property
     def venue_id(self) -> int:
@@ -549,6 +567,12 @@ class ShiftService:
             created_by=actor.user_id,
         )
         await self._notifier.shift_saved(shift)
+        await self._audit.created(
+            actor,
+            AuditEntity.SHIFT,
+            shift.id,
+            after=snapshot(shift, *_AUDITED_SHIFT_FIELDS),
+        )
         return ShiftSaved(
             view=await self._view(shift),
             warnings=await self._warnings(shift.shift_date),
@@ -617,6 +641,13 @@ class ShiftService:
         # Plan, task 16: *any* edit goes through the scheduler. Working out whether this
         # particular one moves a notification is the notifier's job, not the caller's.
         await self._notifier.shift_saved(updated)
+        await self._audit.updated(
+            actor,
+            AuditEntity.SHIFT,
+            updated.id,
+            before=snapshot(current, *fields),
+            after=dict(fields),
+        )
 
         warned_date = updated.shift_date
         warnings = await self._warnings(warned_date)
@@ -655,6 +686,12 @@ class ShiftService:
         if not await self._shifts.delete(shift_id):
             raise ShiftNotFoundError(shift_id, self._venue_id)
         await self._notifier.shift_removed(removed.shift_id)
+        await self._audit.deleted(
+            actor,
+            AuditEntity.SHIFT,
+            removed.shift_id,
+            before=snapshot(current, *_AUDITED_SHIFT_FIELDS),
+        )
         return ShiftRemoved(shift=removed, warnings=await self._warnings(removed.shift_date))
 
     # -- internals ----------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Screens as pure functions: a service view in, a text and a keyboard out.
 
 **Why this package exists at all.** Two different processes have to draw the same screen.
-The bartender opens the opening checklist from «Моя смена» — that is a handler in the bot
+The bartender opens the opening checklist from the shift screen — that is a handler in the bot
 process; the same checklist arrives on its own before the shift (TZ 1.4#2, 5.4) — that is
 the worker, a separate process with no update, no callback query and no router. If the
 screen were built inside the handler, the worker would have a second copy of it, and the

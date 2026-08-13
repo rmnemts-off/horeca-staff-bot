@@ -11,7 +11,7 @@ matches, so the order is a rule and not a listing:
 
 1. `onboarding` — TZ 5.1. It owns `/start` and the invite code, which is the one road in
    for somebody who has no membership yet; nothing else may answer them.
-2. `menu` — TZ 5.2 and 5.3: the sections of the main menu, «Моя смена» and «График». It is
+2. `menu` — TZ 5.2 and 5.3: the main menu's own sections, the shift and the schedule. It is
    above the scenarios because a menu press ends the scenario it interrupts, and the
    middleware that enforces that (`src/bot/middlewares/menu.py`) has already run.
 3. `checklist` — TZ 5.4, the employee's screen.

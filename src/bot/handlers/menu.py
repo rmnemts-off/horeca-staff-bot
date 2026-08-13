@@ -1,4 +1,4 @@
-"""The main menu, «Моя смена» and «График» (TZ 5.2, 5.3; plan task 23).
+"""The main menu, the shift screen and the schedule (TZ 5.2, 5.3; plan task 23).
 
 Owner: plan task 23. The router is declared empty so that the tree in
 `src/bot/handlers/__init__.py` is complete from the first commit of wave 2 and the guard in
