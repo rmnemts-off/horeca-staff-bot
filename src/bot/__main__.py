@@ -5,8 +5,14 @@ anything connects (TZ 9); the assembly is `src/bot/dispatcher.py`; what happens 
 update is `src/bot/middlewares/` and the routers. This file is the order of the four, plus
 the shutdown that closes what it opened.
 
-Stage 0 answers `/start` with the main menu and nothing else — the handlers of TZ 5.1-5.8
-are plan tasks 22-30 and arrive as their own routers.
+The screens themselves are `src/bot/handlers/`, one module per functional block, and the
+order they are consulted in is decided there.
+
+**The notification worker is not started here.** It is a second process
+(`python -m src.scheduler`), and that is a requirement rather than a deployment taste:
+acceptance criterion 11.4 asks for the scheduler to be restarted on its own and for the
+notification to arrive exactly once anyway, which cannot be shown if restarting it means
+restarting the bot.
 """
 
 from __future__ import annotations
