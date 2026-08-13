@@ -66,10 +66,11 @@ def build_dispatcher(
         sessions=sessions,
         bootstrap_owner_ids=bootstrap_owner_ids,
     )
-    # The routers of TZ 5.1-5.8 are included here as they are written (plan, tasks 22-30).
-    # Nothing has to come first: the main-menu press of TZ 5.2 is decided before routing
-    # starts, by the middleware, and cannot be outranked by an include in the wrong order.
-    dispatcher.include_router(routers.system_router())
+    # The routers of TZ 5.1-5.8, in the order `src/bot/handlers/__init__.py` explains. The
+    # main-menu press of TZ 5.2 is *not* among them: it is decided before routing starts,
+    # by the middleware, and so cannot be outranked by an include in the wrong place.
+    for router in routers.all_routers():
+        dispatcher.include_router(router)
     return dispatcher
 
 

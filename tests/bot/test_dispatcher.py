@@ -36,7 +36,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.methods import SendMessage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, Update
-from src.bot import routers, texts
+from src.bot import handlers, routers, texts
 from src.bot.callbacks import MenuAction, MenuKeep, OpenSection
 from src.bot.dispatcher import FSM_KEY_PREFIX, FSM_TTL, build_dispatcher, build_storage
 from src.bot.middlewares.activity import LastSeenMiddleware
@@ -109,7 +109,10 @@ def test_the_interception_does_not_depend_on_the_order_of_the_routers() -> None:
     the wizard router deliberately in front of the sections.
     """
     dispatcher = build_dispatcher(storage=MemoryStorage())
-    assert [router.name for router in dispatcher.sub_routers] == [routers.SYSTEM_ROUTER]
+    assert [router.name for router in dispatcher.sub_routers] == list(routers.router_names())
+    # And the tree is the one `src/bot/handlers/__init__.py` describes: onboarding owns the
+    # way in (TZ 5.1) and is therefore first, whatever else is added after it.
+    assert dispatcher.sub_routers[0].name == "onboarding"
 
 
 # --------------------------------------------------------------------------------------
@@ -355,7 +358,7 @@ async def test_a_caption_stage_zero_does_not_draw_is_not_a_menu_press() -> None:
 async def test_start_answers_a_member_with_the_menu() -> None:
     bot = make_bot()
     dispatcher = Dispatcher(storage=MemoryStorage())
-    dispatcher.include_router(routers.system_router())
+    dispatcher.include_router(handlers.onboarding.router())
     await feed(dispatcher, bot, message_update("/start"))
     assert session_of(bot).sent_texts() == [texts.MENU_PROMPT]
 
