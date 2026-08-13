@@ -1,0 +1,21 @@
+Alembic migrations for BarPoint Staff Bot (async engine, PostgreSQL 16).
+
+The connection URL is never stored in alembic.ini (TZ 9). env.py resolves it from, in order:
+  1. Config.attributes["database_url"]  - used by tests/conftest.py
+  2. the DATABASE_URL environment variable - used by docker/entrypoint.sh
+  3. src.config.settings.database_url    - the local .env file
+
+Usage:
+  alembic upgrade head             apply everything
+  alembic downgrade base           roll everything back
+  alembic upgrade head --sql       print the DDL without touching a database
+  alembic revision --autogenerate -m "..."   diff src/db/models against the database
+
+Hard rule (TZ 1.4#6, acceptance criterion 11.5): a migration creates structure, never data.
+No INSERT, no op.bulk_insert, no reference values - not even "obvious" ones such as
+write-off reasons or checklist items. tests/test_no_seed_data.py enforces this.
+
+Revisions are numbered by hand (0001, 0002, ...) so the order is readable in a listing.
+Pass the number explicitly, otherwise Alembic invents a random hex id:
+
+  alembic revision --autogenerate --rev-id 0002 -m "add something"
