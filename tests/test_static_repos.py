@@ -101,6 +101,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from src.db.models import Base
 
 from tests.repo_scan import (
     REPO_ROOT,
@@ -183,9 +184,29 @@ EXEMPT_MARKER = "# venue-exempt:"
 
 #: The only queries allowed to skip rule 3, spelled out so that a new one shows up in the
 #: diff of *this* file. Key: (path relative to the repository, enclosing function).
-#: Empty on purpose — `ChildRepository._through_parent` is accepted structurally, through
-#: its call sites, not by being listed here.
-ALLOWED_VENUE_EXEMPTIONS: dict[tuple[str, str], str] = {}
+#: `ChildRepository._through_parent` is deliberately *not* here — it is accepted
+#: structurally, through its call sites.
+#:
+#: Both entries below are tables with no `venue_id` column at all, which is the one case the
+#: rule cannot decide: there is nothing to compare against. Each repository funnels every
+#: statement it runs through the single private method named here, so the exemption stays one
+#: function wide and a second unscoped query in either module fails the guard.
+#:
+#: The reason strings are prose, and prose grants nothing:
+#: `test_an_exemption_names_a_table_without_a_venue_column` reads the entity each function
+#: queries off its syntax tree and asks `Base.metadata` whether that table really has no
+#: `venue_id`. An entry added for a scoped table fails there, so this dict cannot be used to
+#: silence rule 3 on a table the rule was able to decide on.
+ALLOWED_VENUE_EXEMPTIONS: dict[tuple[str, str], str] = {
+    ("src/db/repositories/users.py", "UserRepo._fetch"): (
+        "`users` is global by TZ 2 — one person works in several venues — and has no "
+        "venue_id column; the venue-scoped half of a person is `venue_members`"
+    ),
+    ("src/db/repositories/venues.py", "VenueRepo._fetch"): (
+        "`venues` is the scope itself rather than a scoped table, and the venue-context "
+        "middleware reads it before any scope exists (TZ 3.3, 5.1)"
+    ),
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -813,6 +834,68 @@ def test_exemption_list_has_no_stale_entries() -> None:
         )
 
 
+def mapped_tables() -> dict[str, str]:
+    """Mapped class name -> table name, straight from the declarative registry."""
+    return {mapper.class_.__name__: mapper.class_.__tablename__ for mapper in Base.registry.mappers}
+
+
+def exempted_entities(filename: str, function: str) -> set[str]:
+    """The mapped classes the exempted function builds its statements over.
+
+    Read off the syntax tree rather than declared next to the exemption, because a
+    declaration is the thing being checked. What the function actually selects is the only
+    answer to "which table could rule 3 not decide on".
+
+    Only the entities of the statement constructors count, not every model the function
+    mentions: `select(Venue).join(VenueMember, ...)` answers `Venue`. The join reaches a
+    second table through a condition of its own and says nothing about whether the first
+    one has a `venue_id`.
+    """
+    module = Module(read(REPO_ROOT / filename), filename)
+    known = mapped_tables()
+    found: set[str] = set()
+    for node, _ in module.sql_calls():
+        func = node.func
+        if not isinstance(func, ast.Name) or func.id not in module.sql_names:
+            continue
+        if module.function_name(node) != function:
+            continue
+        found.update(name for name in map(_root_name, node.args) if name in known)
+    return found
+
+
+@pytest.mark.parametrize(("filename", "function"), sorted(ALLOWED_VENUE_EXEMPTIONS))
+def test_an_exemption_names_a_table_without_a_venue_column(filename: str, function: str) -> None:
+    """The registry defends itself: the one legal reason to be exempt is checked, not typed.
+
+    Rule 3 has exactly one case it cannot decide — a table with no `venue_id` column at
+    all, where there is nothing to compare `self.venue_id` against. Both entries of
+    `ALLOWED_VENUE_EXEMPTIONS` are that case, and until now that was a claim in a comment:
+    a line added for a table that *does* have `venue_id` would switch the rule off for it
+    and nothing would notice.
+
+    So the claim is checked against `Base.metadata`, which is where the schema is actually
+    declared. An entry survives only while the table it exempts genuinely has no `venue_id`
+    — the day someone adds the column, or registers a function that queries a scoped table,
+    this test fails and the exemption has to go instead of the filter.
+    """
+    tables = mapped_tables()
+    entities = exempted_entities(filename, function)
+    assert entities, (
+        f"{filename}:{function} is registered in ALLOWED_VENUE_EXEMPTIONS, but no statement "
+        "inside it is built over a mapped model, so there is no table to hold the exemption "
+        "to. An exemption that cannot be checked is not an exemption"
+    )
+    for name in sorted(entities):
+        table = Base.metadata.tables[tables[name]]
+        assert "venue_id" not in table.c, (
+            f"{filename}:{function} is exempt from rule 3, but `{table.name}` has a venue_id "
+            f"column ({name}.venue_id). The only case the rule cannot decide is a table "
+            "without that column; here it can. Drop the exemption and add the filter "
+            "(TZ 3.3, acceptance 11.3)"
+        )
+
+
 def test_the_guard_is_not_vacuous() -> None:
     """Rules that scan nothing pass for the wrong reason."""
     assert INSIDE_REPOSITORIES, "src/db/repositories/ has no modules to check"
@@ -1345,7 +1428,11 @@ def test_a_repository_may_not_choose_its_own_venue_column() -> None:
     from typing import Any
 
     from sqlalchemy import ColumnElement
-    from src.db.models import Base, Product
+
+    # `Base` comes from the module-level import above: with `from __future__ import
+    # annotations` the annotation below is resolved there, and a second local binding
+    # would simply be unused.
+    from src.db.models import Product
     from src.db.repositories import BaseRepository, RepositoryScopeError
 
     with pytest.raises(RepositoryScopeError):
