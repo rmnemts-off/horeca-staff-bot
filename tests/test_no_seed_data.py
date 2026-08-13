@@ -521,6 +521,12 @@ def catalogue_names(source: str, filename: str = "<probe>") -> list[str]:
     return offenders
 
 
+#: Code of a linter rule: RUF001, S101, E501, B008, ANN204. Toolchain configuration is full
+#: of these, and three of them in a row are a legitimate ignore list, not a content catalogue.
+#: Real content never looks like this -- a checklist item or a writeoff reason is words.
+RULE_CODE = re.compile(r"^[A-Z]{1,5}[0-9]{2,4}$")
+
+
 def _is_technical(word: str, vocabulary: frozenset[str] | set[str]) -> bool:
     """True when the string is machinery: schema vocabulary, a parameter name, a template."""
     if word in vocabulary:
@@ -529,6 +535,8 @@ def _is_technical(word: str, vocabulary: frozenset[str] | set[str]) -> bool:
     if len(stripped) <= 3:
         return True
     if TEMPLATE_TOKEN.search(stripped):
+        return True
+    if RULE_CODE.match(stripped):
         return True
     return bool(IDENTIFIER_TOKEN.match(stripped) and "_" in stripped)
 

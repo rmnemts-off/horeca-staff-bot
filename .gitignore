@@ -29,10 +29,8 @@ htmlcov/
 # macOS
 .DS_Store
 
-# Reference workbook. TZ 1.6 asks for it to live in tests/fixtures/reference/, and that is
-# where it sits on disk -- but this repository is PUBLIC, and the workbook carries a real
-# bar's commercial data: supplier contact names with mobile numbers, purchase prices and
-# cost margins. Committing it would publish someone else's personal and commercial data.
-# Keep it local until the repository is made private (then delete these two lines) or the
-# file is sanitised. See docs/schema-notes.md.
-tests/fixtures/reference/Invasion.xlsx
+# Reference workbook. The repository is PUBLIC, so only the sanitised copy is committed:
+# tests/fixtures/reference/Invasion.xlsx, produced by tests/tools/sanitize_reference.py.
+# The untouched original carries a real bar's supplier contacts with mobile numbers,
+# purchase prices and cost margins -- it stays on the maintainer's disk and never leaves it.
+tests/fixtures/reference/*.original.xlsx
