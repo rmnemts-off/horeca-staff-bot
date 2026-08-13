@@ -18,8 +18,15 @@ closed:
 
 * a keyword split across literals — `op.execute("INSER" "T INTO writeoff_reasons …")`;
 * content arriving base64-decoded, `chr()`-assembled or joined at runtime out of pieces;
-* wording in `src/bot/texts/` spelled as separately named constants or class attributes —
-  three named phrases there are indistinguishable from three interface messages;
+* a function that assembles a list out of constants at call time — the elements are names
+  by then, and the shape is indistinguishable from a screen collecting its own wording;
+* wording in `src/bot/texts/` spelled as separately named constants **whose names do not
+  count** — `BAR_TOP = "…"`, `ICE_BIN = "…"`, `COFFEE = "…"` reads exactly like three
+  interface messages, and no rule can tell them from `MENU_SHIFT_BUTTON` and its
+  neighbours without failing on the real main menu. The variant that *does* count —
+  `LINE_ONE`, `LINE_TWO`, `LINE_THREE`, or `ITEM_1 … ITEM_3` — is closed by rule 3: a
+  person writing a catalogue longhand numbers it, and nothing legitimate in this project
+  numbers its wording;
 * content written as identifiers — `["bar_top", "coffee_machine", "ice_bin"]` reads as
   machinery to rule 3 and passes. It also reads as machinery to a bartender, which is why
   the trade-off is accepted: the rule is tuned not to fire on parameter names and
@@ -69,6 +76,16 @@ The rules:
    string data, and a collection of three or more strings that are not schema vocabulary.
    Inside `src/bot/texts/` the second test is stricter still: interface wording is a set of
    named constants, and a list of three phrases there is a checklist, not a message.
+
+   A catalogue does not have to be spelled as a collection, and the second test therefore
+   also counts two shapes that a list naturally decays into. **One string holding the
+   list**: three or more non-empty lines in a single literal that interpolates nothing.
+   Wording is a sentence or two and says what it is about — the checklist's «send it as it
+   is?» message is three lines around a `{lines}` placeholder and passes; three flat lines
+   that fill in nothing are a list somebody pasted into a constant. **The list numbered out
+   longhand**: three or more constants whose names differ only in a counting component
+   (`ITEM_1 … ITEM_3`, `LINE_ONE … LINE_THREE`). Both are what a person reaches for after
+   the plain list fails the rule above.
 
    And no **ORM object is built while a module is imported** anywhere in `src/`:
    `_PRELOADED = (WriteoffReason(name="…"), …)` is a reference book whose elements are
@@ -159,6 +176,18 @@ MAKO_PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
 #: A catalogue joined into one literal: `"Whiskey,Gin,Vermouth".split(",")`. Comma
 #: separated, no whitespace — SQL and prose have spaces, a packed list does not.
 PACKED_LIST = re.compile(r"^[^\s,]+(?:,[^\s,]+){2,}$")
+
+#: How many entries make a catalogue. Three, everywhere in this file: two phrases are a
+#: pair of messages, three are a list of something.
+CATALOGUE_SIZE = 3
+
+#: The counting part of a name: `ITEM_1`, `FIRST_LINE`, `LINE_TWO`. Constants whose names
+#: differ only here are one list written out by hand — nothing in this project numbers its
+#: interface wording, and a person typing a catalogue longhand always does.
+ORDINAL_COMPONENT = re.compile(
+    r"(?:^|_)(?:\d+|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH"
+    r"|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN)(?=_|$)"
+)
 
 #: `CREATE TYPE x AS ENUM ('a', 'b')` written by hand in a migration.
 CREATE_ENUM = re.compile(r"create\s+type\s+([\w.\"]+)\s+as\s+enum\s*\(([^)]*)\)", re.IGNORECASE)
@@ -554,10 +583,97 @@ def _is_typing_literal(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
     return False
 
 
+def _prose_nodes(tree: ast.Module) -> set[int]:
+    """`id()` of every string that is a statement of its own.
+
+    Wider than :func:`docstring_nodes`, which marks the first statement of a module, a
+    class or a function: an attribute docstring is the same thing one line further down.
+    Nothing can read a string that is nobody's value, so nothing can ship inside one — but
+    a module docstring in `src/bot/texts/` is several lines of Russian prose, and the
+    multi-line rule below would read it as a list.
+    """
+    return {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+
+
+def _multiline_catalogues(
+    tree: ast.Module, vocabulary: frozenset[str] | set[str], *, texts: bool
+) -> list[str]:
+    """One string holding the list the rule above would have caught as a list.
+
+    `"Turn on the coffee machine\\nCheck the ice\\nWipe the bar top"` is a checklist with
+    the brackets taken off. What tells it from wording is not the language and not the
+    length: it is that an interface message says what it is *about* — it interpolates the
+    run, the name, the count — and three flat lines that interpolate nothing are entries.
+    """
+    prose = _prose_nodes(tree)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in prose or TEMPLATE_TOKEN.search(node.value):
+            continue
+        lines = [line.strip() for line in node.value.splitlines() if line.strip()]
+        listed = lines if texts else [line for line in lines if not _is_technical(line, vocabulary)]
+        if len(listed) >= CATALOGUE_SIZE:
+            offenders.append(f"line {node.lineno}: {len(listed)} lines in one literal {listed[:4]}")
+    return offenders
+
+
+def _numbered_constants(
+    tree: ast.Module, vocabulary: frozenset[str] | set[str], *, texts: bool
+) -> list[str]:
+    """The same list, numbered out longhand into three constants.
+
+    `LINE_ONE`, `LINE_TWO`, `LINE_THREE` are one collection with the commas replaced by
+    newlines. Three *differently* named phrases stay legal on purpose (see the threat
+    model): `MENU_SHIFT_BUTTON` and its neighbours are exactly that shape and are the real
+    main menu. Counting is the difference — wording in this project is named after what it
+    says, and a catalogue typed out by hand is numbered because its entries have no names.
+    """
+    families: dict[str, list[str]] = {}
+    lines: dict[str, int] = {}
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        if not (texts or not _is_technical(value.value, vocabulary)):
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name) or not CONSTANT_NAME.match(target.id):
+                continue
+            if not ORDINAL_COMPONENT.search(target.id):
+                continue
+            family = ORDINAL_COMPONENT.sub("_#", target.id)
+            families.setdefault(family, []).append(target.id)
+            lines.setdefault(family, node.lineno)
+    return [
+        f"line {lines[family]}: {len(names)} numbered constants {sorted(names)[:4]}"
+        for family, names in sorted(families.items())
+        if len(names) >= CATALOGUE_SIZE
+    ]
+
+
 def content_collections(
     source: str, filename: str = "<probe>", *, texts: bool = False
 ) -> list[str]:
-    """Collections of three or more strings that are not the schema talking about itself.
+    """Content written as a collection of three or more strings — in any of its shapes.
+
+    A list of phrases, a catalogue packed into one comma-separated literal, the same list
+    spelled across the lines of a single string, and the same list numbered out into three
+    constants. All four are the same thing; only the first is written with brackets.
 
     In `src/bot/texts/` the vocabulary exemption does not apply: interface wording is a
     named constant per message, and a list of three phrases is a checklist (TZ 1.4#6).
@@ -606,6 +722,9 @@ def content_collections(
         packed = parts if texts else [word for word in parts if not _is_technical(word, vocabulary)]
         if len(packed) >= 3:
             offenders.append(f"line {node.lineno}: packed list {packed[:4]}")
+
+    offenders.extend(_multiline_catalogues(tree, vocabulary, texts=texts))
+    offenders.extend(_numbered_constants(tree, vocabulary, texts=texts))
     return offenders
 
 
@@ -1324,6 +1443,32 @@ CONTENT_BYPASSES: list[tuple[str, str, bool]] = [
         'ITEMS = ("Espresso machine", "Ice", "Bar top")',
         False,
     ),
+    (
+        "the list spelled across the lines of one string in texts/",
+        """OPENING = (
+    "Включить кофемашину\\n"
+    "Проверить лёд\\n"
+    "Протереть стойку"
+)""",
+        True,
+    ),
+    (
+        "the same thing in a script, under a name that announces nothing",
+        'WORDING = "Bottle breakage\\nSpillage\\nExpired stock"',
+        False,
+    ),
+    (
+        "the list numbered out into constants in texts/",
+        'LINE_ONE = "Включить кофемашину"\n'
+        'LINE_TWO = "Проверить лёд"\n'
+        'LINE_THREE = "Протереть стойку"',
+        True,
+    ),
+    (
+        "the same, digits instead of words, outside texts/",
+        'PHRASE_1 = "Bottle breakage"\nPHRASE_2 = "Spillage"\nPHRASE_3 = "Expired stock"',
+        False,
+    ),
 ]
 
 CLEAN_CONTENT: list[tuple[str, str, bool]] = [
@@ -1355,6 +1500,35 @@ CLEAN_CONTENT: list[tuple[str, str, bool]] = [
     (
         "one interface message per constant",
         'GREETING = "Привет"\nBUTTON_SHIFT = "Моя смена"',
+        True,
+    ),
+    (
+        "a multi-line message that interpolates what it is about",
+        """SKIPPED = (
+    "Осталось не отмечено:\\n"
+    "{lines}\\n"
+    "Отправить как есть?"
+)""",
+        True,
+    ),
+    (
+        "the real main menu: three phrases, three names, no counting",
+        'MENU_SHIFT_BUTTON = "📋 Моя смена"\n'
+        'MENU_SCHEDULE_BUTTON = "📅 График"\n'
+        'MENU_MANAGEMENT_BUTTON = "⚙️ Управление"',
+        True,
+    ),
+    (
+        "a two-line message is wording, not a list",
+        """INVITE = (
+    "Код принят.\\n"
+    "Осталось назвать себя."
+)""",
+        True,
+    ),
+    (
+        "a module docstring is prose about the code",
+        '"""One line about the module.\n\nAnother line.\n\nA third.\n"""\n\nX = "Привет"',
         True,
     ),
 ]
