@@ -1,0 +1,1 @@
+"""BarPoint staff bot."""
