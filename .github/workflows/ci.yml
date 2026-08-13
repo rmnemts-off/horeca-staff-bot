@@ -1,0 +1,129 @@
+# Plan task 8 (block B): lint -> mypy -> pytest on live postgres and redis.
+# Closes test 43 (criterion 11.9) and turns the runtime half of criterion 11.5 --
+# "the database is empty after migrations" -- from SKIPPED into an actual check.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run: nothing is gained by finishing
+# a check on a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: lint, types, tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Same major version as the stand (TZ 3.1). The migration uses NULLS NOT
+        # DISTINCT, which needs PostgreSQL 15+, so the version is not incidental.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: barpoint
+          # Throwaway credentials of an ephemeral service container that only ever
+          # listens on the runner's loopback. Not a secret and not a deployment default:
+          # the stand takes its password from the environment (TZ 9).
+          POSTGRES_PASSWORD: barpoint
+          POSTGRES_DB: barpoint
+          # TZ 3.4: everything is stored in UTC.
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U barpoint -d barpoint"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      APP_ENV: test
+      LOG_LEVEL: INFO
+      # tests/conftest.py connects over this URL, creates a throwaway database per run
+      # and drops it afterwards; the CREATE DATABASE it issues needs a reachable server,
+      # which is exactly what the service container above provides.
+      DATABASE_URL: postgresql+asyncpg://barpoint:barpoint@localhost:5432/barpoint
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Python 3.12 exactly as TZ 3.1 requires, the same version the image runs.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # ---- lint ----------------------------------------------------------------------
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      # ---- types ---------------------------------------------------------------------
+      # Targets come from [tool.mypy].files in pyproject.toml (src and tests), so the
+      # workflow cannot silently check less than the local run does.
+      - name: mypy
+        run: mypy
+
+      # ---- schema --------------------------------------------------------------------
+      # The offline render (`alembic upgrade head --sql`) proves nothing about CREATE
+      # EXTENSION pg_trgm, gin_trgm_ops, partial unique indexes or NULLS NOT DISTINCT.
+      # This step is the first place where the migration meets a real server.
+      - name: alembic upgrade head
+        run: alembic upgrade head
+
+      - name: alembic downgrade base
+        run: alembic downgrade base
+
+      # Back to head, so the tests start against the schema they expect.
+      - name: alembic upgrade head (again)
+        run: alembic upgrade head
+
+      # ---- tests ---------------------------------------------------------------------
+      - name: pytest
+        run: pytest -q -rs
+
+      # db-marked tests skip themselves when the database is unreachable, which is right
+      # on a laptop and wrong here: a green run full of skips would mean criterion 11.5
+      # was never checked at all. This step fails if any db test skipped, or if none ran.
+      - name: db-marked tests must actually run
+        shell: bash
+        run: |
+          pytest -q -rs -m db | tee "${RUNNER_TEMP}/db-tests.log"
+          if grep -qiE '[0-9]+ skipped' "${RUNNER_TEMP}/db-tests.log"; then
+            echo "::error::db-marked tests were skipped -- the database was not reachable"
+            exit 1
+          fi
+          if ! grep -qiE '[0-9]+ passed' "${RUNNER_TEMP}/db-tests.log"; then
+            echo "::error::no db-marked test ran; criterion 11.5 is unchecked"
+            exit 1
+          fi

@@ -1,0 +1,25 @@
+# Developer machine only. `docker compose up` merges this file into docker-compose.yml
+# automatically; a deployment runs `docker compose -f docker-compose.yml up -d` and never
+# picks it up. Nothing here is copied into the image (.dockerignore).
+#
+# Why it exists: without published ports the database lives inside the compose network and
+# nothing on the host can reach it. Two documented workflows depend on host access:
+#
+#   * db-marked tests. tests/conftest.py connects to the maintenance database over
+#     DATABASE_URL and issues CREATE DATABASE for a throwaway database per run; it does
+#     that from the host, not from inside the network. Without ports the runtime half of
+#     criterion 11.5 (`tests/test_empty_delivery.py`) stays SKIPPED forever.
+#   * "locally without docker" from CLAUDE.md: `.venv/bin/python -m src.bot` against a
+#     postgres and a redis that were brought up by this very compose file.
+#
+# Ports are published on the loopback interface only: an open 5432 on a laptop in a cafe
+# is a real exposure, and nothing outside this machine has any business reaching the stand.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT_HOST:-5432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_PORT_HOST:-6379}:6379"
