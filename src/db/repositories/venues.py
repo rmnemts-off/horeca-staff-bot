@@ -67,6 +67,24 @@ class VenueRepo:
         """Every venue this person holds a membership row in (TZ 5.1: the venue picker)."""
         return await self._fetch(VenueMember.user_id == user_id, through_membership=True)
 
+    async def list_active(self) -> Sequence[Venue]:
+        """Every venue that is switched on — the scopes the worker polls (plan, task 31).
+
+        The notification queue is scoped like every other table of the schema (TZ 3.3):
+        ``NotificationRepo`` carries a venue and offers no cross-venue query, deliberately.
+        The worker is a process and not a person, so it has no membership to derive a scope
+        from — it asks this, then claims *inside* each venue in turn. That is one statement
+        per venue per tick against an indexed ``(status, scheduled_at)``, which at any
+        realistic number of venues costs far less than the hole a global claim would open:
+        one query that reaches every venue's rows is exactly what acceptance 11.3 forbids
+        everywhere else, and a worker is the last place to make an exception for it.
+
+        Inactive venues are left out on purpose. A venue that was switched off should not
+        keep pushing checklists at the people who used to work there, and the queue may
+        still hold rows scheduled before it was switched off.
+        """
+        return await self._fetch(Venue.is_active.is_(True))
+
     async def create(self, *, name: str, city: str, timezone: str) -> Venue:
         """A new venue. `timezone` is an IANA name and is validated by the service (TZ 3.4)."""
         venue = Venue(name=name, city=city, timezone=timezone)

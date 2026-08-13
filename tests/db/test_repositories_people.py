@@ -118,6 +118,22 @@ async def test_list_for_user_is_empty_for_a_person_without_memberships(
     assert list(found) == []
 
 
+async def test_list_active_skips_a_venue_that_was_switched_off(session: AsyncSession) -> None:
+    """The worker polls this list, and a switched-off venue must stop pushing (task 31).
+
+    Its queue may well still hold rows scheduled before it was switched off; delivering
+    them would send a checklist to people who no longer work anywhere.
+    """
+    live = await create_venue(session)
+    closed = await create_venue(session)
+    await VenueRepo(session).update(closed.id, is_active=False)
+
+    found = await VenueRepo(session).list_active()
+
+    assert live.id in {venue.id for venue in found}
+    assert closed.id not in {venue.id for venue in found}
+
+
 # --------------------------------------------------------------------------------------
 # venue_settings
 # --------------------------------------------------------------------------------------
