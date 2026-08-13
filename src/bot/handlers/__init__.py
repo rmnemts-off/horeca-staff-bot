@@ -16,10 +16,16 @@ matches, so the order is a rule and not a listing:
    middleware that enforces that (`src/bot/middlewares/menu.py`) has already run.
 3. `checklist` — TZ 5.4, the employee's screen.
 4. `recipes` — TZ 5.5, the search and the card.
-5. the `admin_*` modules — TZ 5.8, one per block of the management section. They come last
-   because every one of them is reached from a button of its own and nothing routes to them
-   by accident; among themselves the order does not matter, because each filters on its own
-   callback factories.
+5. `admin` and the `admin_*` modules — TZ 5.8: the board of the management section, then
+   one module per block of it. They come last because every one of them is reached from a
+   button of its own and nothing routes to them by accident; among themselves the order
+   does not matter, because each filters on its own callback factories.
+
+**A section is owned end to end by one module** — the caption on the reply keyboard, the
+`OpenSection` button that means the same thing, and `Nav(BACK, section=…)` returning to it.
+Splitting those three across modules would put the same screen in three places and make the
+first of them the one that drifts. `Nav(HOME)`, `Nav(CANCEL)` and `Nav(BACK)` with no
+section belong to `menu`: they lead to the main menu, which is nobody else's screen.
 
 Registration is by factory (`Factory.filter()`) and by state, never by a raw prefix string:
 the payload has already been parsed and checked by the resolver before any of this runs.
@@ -30,6 +36,7 @@ from __future__ import annotations
 from aiogram import Router
 
 from src.bot.handlers import (
+    admin,
     admin_checklists,
     admin_recipes,
     admin_schedule,
@@ -54,6 +61,7 @@ def all_routers() -> tuple[Router, ...]:
         menu.router(),
         checklist.router(),
         recipes.router(),
+        admin.router(),
         admin_venue.router(),
         admin_staff.router(),
         admin_checklists.router(),
@@ -63,6 +71,7 @@ def all_routers() -> tuple[Router, ...]:
 
 
 __all__ = [
+    "admin",
     "admin_checklists",
     "admin_recipes",
     "admin_schedule",
