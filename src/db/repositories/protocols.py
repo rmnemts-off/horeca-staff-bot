@@ -334,6 +334,25 @@ class ChecklistRunRepository(Protocol):
         skip_comment: str | None = None,
     ) -> ChecklistRun | None: ...
 
+    # Records that an unfinished run passed its deadline (TZ 4.3, 5.4). Without it
+    # `list_by_status(RunStatus.OVERDUE)` above could never see a row: `complete()` is the
+    # only other status write, and it requires `completed_by` and stamps `completed_at`,
+    # while an overdue run is by definition not finished. The value is in the enum of
+    # TZ 4.3 and TZ 5.4 asks for it, so it has to be writable. Returns `None` when the run
+    # is unknown, already finished or already marked, so that the manager is told once —
+    # the same rule as `complete()`.
+    async def mark_overdue(self, run_id: int, moment: dt.datetime) -> ChecklistRun | None: ...
+
+    # Undoes a completion (TZ 5.4, last block of rules: a checklist cannot be taken twice,
+    # but a manager may reopen a run when the person got it wrong). Every other status
+    # write in this protocol moves *forward* — `complete()` stamps `completed_at`,
+    # `mark_overdue()` refuses a finished run — so the rule cannot be spelled with them.
+    # The mirror of `complete()`: `SET completed_at = NULL, status = 'in_progress' WHERE
+    # completed_at IS NOT NULL`, and `None` when there was nothing to undo, so two managers
+    # pressing the button at once reopen the run once. Schema note Q4: reopening gets no
+    # columns of its own, the fact goes to `audit_log` and the caller writes it.
+    async def reopen(self, run_id: int) -> ChecklistRun | None: ...
+
     async def refresh_counters(self, run_id: int) -> ChecklistRun | None: ...
 
 
@@ -596,7 +615,23 @@ class KnowledgeArticleRepository(Protocol):
 
 
 class NotificationRepository(Protocol):
-    """The notifications table is the only queue (D5); the worker owns claim and release."""
+    """The notifications table is the only queue (D5); the worker owns claim and release.
+
+    **A claim is concluded only by the worker that holds it** (acceptance 11.4). `sending`
+    is one status shared by every worker, so it cannot answer "is this delivery still
+    mine": a worker whose claim `reclaim_stale` has already handed on would otherwise
+    stamp `sent` over a message not yet sent, or the terminal `failed` over one still in
+    flight — a lost notification. `claim_batch` therefore writes the instant of the claim
+    into `claimed_at` and returns the rows carrying it; the caller keeps that value while
+    it talks to Telegram and hands it back to `mark_sent` / `mark_failed`, which match on
+    it in addition to the status. Everything that ends a claim clears the column, so a late
+    report from a superseded worker simply changes nothing.
+
+    That token is part of the contract, not of the implementation: a repository whose
+    `mark_sent` ignored it would satisfy a protocol without it while quietly reopening the
+    race criterion 11.4 closes. `tests/test_wiring.py` binds the concrete repository to
+    this protocol so that the two cannot drift apart unnoticed again.
+    """
 
     async def get(self, notification_id: int) -> Notification | None: ...
 
@@ -617,9 +652,27 @@ class NotificationRepository(Protocol):
 
     async def reclaim_stale(self, *, older_than: dt.datetime) -> int: ...
 
-    async def mark_sent(self, notification_id: int, moment: dt.datetime) -> None: ...
+    # `claimed_at` is the token `claim_batch` stamped on the row and handed back on it;
+    # keyword-only because it is a fence, not an optional detail — a caller that has lost
+    # the token must say so explicitly rather than let it default away. Passing `None` is
+    # not a way to skip the check: it matches only a row with no claim at all, which
+    # `claim_batch` never leaves behind, so such a call concludes nothing and the row is
+    # reclaimed instead of being wrongly closed.
+    async def mark_sent(
+        self,
+        notification_id: int,
+        moment: dt.datetime,
+        *,
+        claimed_at: dt.datetime | None,
+    ) -> None: ...
 
-    async def mark_failed(self, notification_id: int, error: str) -> None: ...
+    async def mark_failed(
+        self,
+        notification_id: int,
+        error: str,
+        *,
+        claimed_at: dt.datetime | None,
+    ) -> None: ...
 
     async def reschedule(self, notification_id: int, scheduled_at: dt.datetime) -> None: ...
 
