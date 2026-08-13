@@ -1,0 +1,29 @@
+# Nothing that is not needed to run the three processes goes into the image.
+
+.git
+.github
+.gitignore
+.venv
+.env
+.env.local
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+build
+dist
+*.egg-info
+**/__pycache__
+**/*.py[cod]
+
+# The reference workbook is a real bar's data (CLAUDE.md): it must never reach a
+# production container, and the tests that use it do not run there.
+tests
+docs
+
+Dockerfile
+.dockerignore
+docker-compose.yml
+# Developer-machine overlay (published ports): the image has no business carrying it.
+docker-compose.override.yml

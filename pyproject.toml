@@ -1,0 +1,123 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "barpoint-staff-bot"
+version = "0.1.0"
+description = "Telegram bot for bar and cafe staff (BarPoint)"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.15",
+    "SQLAlchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "redis>=5.0",
+    "pydantic>=2",
+    "pydantic-settings>=2.2",
+    "apscheduler>=3.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    # Upper bound on purpose: the contents of mypy's `--strict` set changes between major
+    # versions. The strict flags below are spelled out one by one so the checks do not
+    # depend on the version, but a major bump may still add new error codes.
+    "mypy>=1.10,<3",
+    "openpyxl>=3.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports
+    "RUF",  # ruff-specific
+    # ТЗ 9: секреты только из окружения. bandit ловит захардкоженные пароли и токены,
+    # f-строки в SQL и небезопасные подпроцессы — ровно то, чем это требование ломается.
+    "S",    # flake8-bandit
+]
+
+[tool.ruff.lint.per-file-ignores]
+# assert — рабочий инструмент pytest, а не забытая отладка.
+"tests/**" = ["S101"]
+# Имя таблицы приходит из information_schema самой же базы, а не от пользователя;
+# параметром идентификатор не передашь. Игнор точечный, на один файл, чтобы S608
+# продолжал ловить f-строки в SQL везде остальном (в том числе в src/services).
+"tests/test_empty_delivery.py" = ["S608"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+# tests/ проверяется тоже: conftest.py и factories.py полностью аннотированы и работают
+# с типами SQLAlchemy — самое место для ошибки, которую никто не увидит.
+files = ["src", "tests"]
+plugins = []
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+# Возврат Any — это дыра, через которую тип теряется молча, и в тестовой обвязке
+# (tests/conftest.py) она уже есть. Флаг стоит глобально, а не только в strict-секции.
+warn_return_any = true
+
+# ТЗ 3.2: бизнес-логика и слой данных — под strict.
+#
+# Флаги перечислены поимённо, а не через `strict = true`. Ключ `strict` в per-module
+# секции mypy не поддерживает: config_parser отдаёт его в глобальный set_strict_flags(),
+# в per_module_options он не попадает вовсе, то есть строчка молча включала strict на
+# ВЕСЬ src. Ниже — полный состав `--strict` за вычетом трёх глобальных флагов
+# (warn_unused_configs, warn_redundant_casts, strict_optional), которые per-module
+# не задаются и уже стоят в [tool.mypy] выше.
+[[tool.mypy.overrides]]
+module = ["src.services.*", "src.db.*"]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+extra_checks = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Корень репозитория в sys.path: `pytest` должен работать и без `pip install -e .`,
+# иначе консольный скрипт падает на `import src`, а `python -m pytest` — нет.
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["--strict-markers"]
+markers = [
+    # Задача 5a: тесты, которым нужна живая PostgreSQL. Пропускаются, если DATABASE_URL
+    # не задан или база недоступна — `pytest` без БД обязан быть зелёным.
+    "db: requires a live PostgreSQL (skipped when DATABASE_URL is unreachable)",
+]
