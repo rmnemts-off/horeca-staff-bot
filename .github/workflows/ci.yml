@@ -117,11 +117,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          pytest -q -rs --tb=short 2>&1 | tee "${RUNNER_TEMP}/pytest.log" && exit 0
+          pytest -q -rs -ra --tb=long 2>&1 | tee "${RUNNER_TEMP}/pytest.log" && exit 0
           while IFS= read -r line; do
-            echo "::error::${line}"
-          done < <(grep -E '^(FAILED|ERROR)' "${RUNNER_TEMP}/pytest.log" | head -30)
-          echo "::error::$(tail -3 "${RUNNER_TEMP}/pytest.log" | tr '\n' ' ')"
+            [ -n "${line}" ] && echo "::error::${line}"
+          done < <(tail -60 "${RUNNER_TEMP}/pytest.log")
           exit 1
 
       # db-marked tests skip themselves when the database is unreachable, which is right
