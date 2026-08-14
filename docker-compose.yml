@@ -132,14 +132,13 @@ services:
       <<: *app-environment
       RUN_MIGRATIONS: "0"
     command: ["python", "-m", "src.bot"]
-    # `no`, not `unless-stopped`, and on purpose: src/bot/__main__.py is still the stub of
-    # plan task 1 -- it logs one line and exits 0. A container that exits successfully
-    # under `unless-stopped` is restarted forever, so `docker compose up -d` would look
-    # healthy while producing nothing but a restart loop in the log. Exiting once and
-    # staying exited is the honest picture: the bot does not exist yet.
-    # Flip both this service and `scheduler` back to `unless-stopped` in plan tasks 20 and
-    # 31, when the processes start their polling loops and stop returning.
-    restart: "no"
+    # Both this service and `scheduler` are long-running now (plan tasks 20 and 31), so a
+    # process that stops has failed and has to come back: a bartender opening a shift at
+    # eight in the morning has nobody to restart it. While they were the stubs of task 1 --
+    # one log line and exit 0 -- this was deliberately `no`, because `unless-stopped` over a
+    # process that exits successfully is an endless restart loop that reads as a healthy
+    # stand in `docker compose ps`.
+    restart: unless-stopped
 
   # Separate process on purpose (plan, task 6): criterion 11.4 requires restarting the
   # scheduler on its own and checking that no notification is lost or duplicated.
@@ -149,8 +148,10 @@ services:
       <<: *app-environment
       RUN_MIGRATIONS: "0"
     command: ["python", "-m", "src.scheduler"]
-    # See the comment on `bot`: stub entry point, so no restart policy until task 31.
-    restart: "no"
+    # See the comment on `bot`. The worker matters more than the bot here: the bot's silence
+    # is noticed by the person pressing a button, and the worker's silence is noticed by
+    # nobody -- the checklist simply does not arrive (principle 1.4#2).
+    restart: unless-stopped
 
 volumes:
   postgres-data:
