@@ -27,9 +27,13 @@ from src.db.models import Unit
 # --------------------------------------------------------------------------------------
 
 TTK_TITLE: Final = "ТТК и рецепты"
-TTK_SEARCH_PROMPT: Final = "Напишите название или выберите категорию."
+#: The screen offers one way in and says so. It used to read «or choose a category», and
+#: no screen of stage 0 draws a category button: the prompt was describing a feature that
+#: does not exist, which for the bartender reads as a bot that lost a button. Browsing by
+#: category needs a factory of its own — `RecipeCategory` belongs to the manager's form and
+#: carries `minimum_role=MANAGER` — so it is stage 1, and the wording waits for it.
+TTK_SEARCH_PROMPT: Final = "Напишите название — найду по первым буквам."
 TTK_SEARCH_BUTTON: Final = "🔍 Найти"
-TTK_BY_GROUP_BUTTON: Final = "По категориям"
 
 #: TZ 8.1 verbatim, the screen a new venue sees first.
 TTK_EMPTY: Final = "Рецептуры пока не заведены. Обратитесь к управляющему."
@@ -104,7 +108,6 @@ def unit_label(unit: Unit) -> str:
 
 
 __all__ = [
-    "TTK_BY_GROUP_BUTTON",
     "TTK_CARD_AMOUNT_TEMPLATE",
     "TTK_CARD_COMPOSITION_TITLE",
     "TTK_CARD_GARNISH_TEMPLATE",

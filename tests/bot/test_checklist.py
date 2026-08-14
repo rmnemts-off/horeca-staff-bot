@@ -38,7 +38,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.methods import EditMessageText, SendMessage
+from aiogram.methods import DeleteMessage, EditMessageText, SendMessage
 from aiogram.types import InlineKeyboardMarkup
 from src.bot import texts
 from src.bot.callbacks import (
@@ -340,6 +340,11 @@ def bad_request(text: str) -> TelegramBadRequest:
     return TelegramBadRequest(method=SendMessage(chat_id=CHAT_ID, text="x"), message=text)
 
 
+def deletes(bot: Bot) -> list[DeleteMessage]:
+    """The messages this bot asked Telegram to remove."""
+    return [call for call in session_of(bot).calls if isinstance(call, DeleteMessage)]
+
+
 def edits(bot: Bot) -> list[EditMessageText]:
     return [call for call in session_of(bot).calls if isinstance(call, EditMessageText)]
 
@@ -557,8 +562,17 @@ def test_the_two_endings_are_the_two_sentences_of_the_tz() -> None:
 # --------------------------------------------------------------------------------------
 
 
-async def test_reentry_edits_the_message_the_run_lives_in_and_not_the_one_pressed() -> None:
-    """TZ 5.4: «Моя смена» re-opens the checklist, and re-opening is an edit."""
+async def test_reopening_brings_the_checklist_down_and_takes_the_old_copy_away() -> None:
+    """TZ 5.4: the shift screen re-opens the checklist «in case he swiped it away».
+
+    The press is answered by putting the checklist *in front of* the employee, because that
+    is what they asked for — the button is on the shift screen precisely when the checklist
+    is not in sight. Editing a message forty messages up answers it with nothing visible.
+
+    One run still has one live message: the run's id moves to the new one and the copy left
+    above is deleted. That is the property «two messages of one run» is about, and it is
+    asserted here rather than the mechanism that used to provide it.
+    """
     bot = make_bot()
     checklists = FakeChecklists(small_view())
     payload = ChecklistShow(run_id=RUN_ID)
@@ -566,10 +580,14 @@ async def test_reentry_edits_the_message_the_run_lives_in_and_not_the_one_presse
 
     await handlers.show(event, bot=bot, **context(checklists, payload=payload))
 
-    assert not sends(bot), "a second checklist message is exactly what TZ 8.2 forbids"
-    (edit,) = edits(bot)
-    assert (edit.chat_id, edit.message_id) == (CHAT_ID, RUN_MESSAGE_ID)
-    assert event.message is not None and edit.message_id != event.message.message_id
+    (sent,) = sends(bot)
+    assert sent.chat_id == CHAT_ID
+    assert not edits(bot), "the checklist is brought down, not rewritten where it was"
+    assert checklists.remembered == [(RUN_ID, CHAT_ID, 1000)], (
+        "the run points at the message the employee is now looking at"
+    )
+    (deleted,) = deletes(bot)
+    assert (deleted.chat_id, deleted.message_id) == (CHAT_ID, RUN_MESSAGE_ID)
 
 
 async def test_a_swiped_message_is_replaced_and_the_new_id_is_written_down() -> None:

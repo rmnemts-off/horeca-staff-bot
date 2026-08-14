@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from aiogram import Bot, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -60,9 +61,12 @@ from src.bot.views.checklist import (
     render_skip_question,
 )
 from src.db.models import ChecklistRun
+from src.logging import get_logger
 from src.services.access import AccessContext
 from src.services.checklists import ChecklistService, CompletionOutcome, ToggleOutcome
 from src.services.timezones import utc_now
+
+logger = get_logger("bot.checklist")
 
 #: Name of this router; read in a traceback and in the assembly test.
 ROUTER_NAME: Final = "checklist"
@@ -79,12 +83,22 @@ RUN_ID_KEY: Final = "run_id"
 
 
 async def show(event: CallbackQuery, bot: Bot, **data: Any) -> None:
-    """Re-open the checklist from the shift screen, or come back to it from the question.
+    """Re-open the checklist from the shift screen (TZ 5.4).
 
-    TZ 5.4 in so many words: the employee may open the current checklist at any moment from
-    the shift section, in case he swiped the message away. The word is *open*, not *send* —
-    the run already has a message and this press edits it, which is why the ids come off the
-    run and not off the update that arrived.
+    **This press moves the checklist to the bottom of the chat rather than editing it where
+    it is,** and it is the one press of this module that does. The rest of TZ 8.2 stands:
+    ticking a line edits the message, because forty taps must not become forty messages.
+    But this button is reached from the shift screen, which the employee opened because the
+    checklist was *not* in front of them — it arrived before the shift and a busy evening
+    has pushed it out of sight, or they swiped it away, which TZ 5.4 names outright. Editing
+    a message forty messages up answers that press with nothing at all: the spinner stops
+    and the screen does not change, which reads as a button that does nothing.
+
+    So the checklist is sent anew, the run's `message_id` moves to it, and the copy left
+    above is removed — one run still has exactly one live message, which is what decision
+    D11 and the "two messages of one run" test are actually about. Deleting is best effort:
+    Telegram refuses to delete anything older than 48 hours, and an old copy that stays is
+    stale but harmless, since every button on it addresses the run and redraws the live one.
     """
     payload: ChecklistShow = data[PAYLOAD_KEY]
     services: VenueServices = data[SERVICES_KEY]
@@ -97,16 +111,55 @@ async def show(event: CallbackQuery, bot: Bot, **data: Any) -> None:
         await event.answer(texts.CHECKLIST_ALREADY_FINISHED, show_alert=True)
         return
 
-    await _draw(
-        bot=bot,
-        checklists=services.checklists,
-        run_id=view.run_id,
-        screen=render_run(view),
-        chat_id=view.chat_id,
-        message_id=view.message_id,
-        here=_chat_of(event),
-        answer=event.answer,
-    )
+    here = _chat_of(event)
+    if here is None:
+        # No chat behind the press (a message too old for Telegram to name). Nothing can be
+        # sent, so fall back to editing whatever the run remembers.
+        await _draw(
+            bot=bot,
+            checklists=services.checklists,
+            run_id=view.run_id,
+            screen=render_run(view),
+            chat_id=view.chat_id,
+            message_id=view.message_id,
+            here=None,
+            answer=event.answer,
+        )
+        return
+
+    spinner = CallbackAnswer(event.answer)
+    try:
+        sent = await bot.send_message(
+            chat_id=here,
+            text=render_run(view).text,
+            reply_markup=render_run(view).markup,
+        )
+        await services.checklists.remember_message(
+            run_id=view.run_id,
+            chat_id=here,
+            message_id=sent.message_id,
+        )
+        await _forget_the_copy_above(bot, chat_id=view.chat_id, message_id=view.message_id)
+    finally:
+        await spinner.close()
+
+
+async def _forget_the_copy_above(bot: Bot, *, chat_id: int | None, message_id: int | None) -> None:
+    """Remove the message this run used to live in; failing to is not a failure.
+
+    Telegram refuses to delete a message older than 48 hours, and the chat may have been
+    cleared by hand. Neither costs anything: every button on the old copy names the run,
+    and the handlers redraw whichever message the run points at now.
+    """
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest:
+        logger.info(
+            "the previous checklist message could not be removed",
+            extra={"chat_id": chat_id, "message_id": message_id},
+        )
 
 
 async def switch_group(event: CallbackQuery, bot: Bot, **data: Any) -> None:
