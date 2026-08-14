@@ -257,6 +257,10 @@ class FakeVenues:
         ids = {row.venue_id for row in self.members.rows if row.user_id == user_id}
         return [venue for venue_id, venue in self.venues.items() if venue_id in ids]
 
+    async def list_active(self) -> Sequence[Venue]:
+        # `VenueRepo.list_active`: switched-on venues, no membership involved.
+        return [venue for venue in self.venues.values() if venue.is_active]
+
     async def create(self, *, name: str, city: str, timezone: str) -> Venue:
         raise NotImplementedError
 

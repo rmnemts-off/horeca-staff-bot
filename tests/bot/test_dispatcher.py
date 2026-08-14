@@ -28,6 +28,7 @@ from typing import Any, Final
 
 import pytest
 from aiogram import Bot, Dispatcher, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -37,8 +38,14 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.methods import SendMessage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, Update
 from src.bot import handlers, routers, texts
-from src.bot.callbacks import MenuAction, MenuKeep, OpenSection
-from src.bot.dispatcher import FSM_KEY_PREFIX, FSM_TTL, build_dispatcher, build_storage
+from src.bot.callbacks import Callback, MenuAction, MenuKeep, OpenSection
+from src.bot.dispatcher import (
+    FSM_KEY_PREFIX,
+    FSM_TTL,
+    build_bot,
+    build_dispatcher,
+    build_storage,
+)
 from src.bot.middlewares.activity import LastSeenMiddleware
 from src.bot.middlewares.auth import ACTOR_KEY, AuthMiddleware
 from src.bot.middlewares.errors import ErrorsMiddleware
@@ -113,6 +120,82 @@ def test_the_interception_does_not_depend_on_the_order_of_the_routers() -> None:
     # And the tree is the one `src/bot/handlers/__init__.py` describes: onboarding owns the
     # way in (TZ 5.1) and is therefore first, whatever else is added after it.
     assert dispatcher.sub_routers[0].name == "onboarding"
+
+
+#: Factories that nothing in the router tree answers, and why. Anything not named here has
+#: to have a handler — see :func:`test_every_callback_factory_is_answered_by_somebody`.
+UNROUTED: Final = {
+    # Answered by `src/bot/middlewares/menu.py`, above routing, so that "carry on" cannot be
+    # outranked by a state-filtered handler. It is drawn by that middleware and nothing else.
+    "MenuKeep": "handled by MenuInterceptMiddleware, not by a router",
+    # The checklist template editor, plan task 28; `handlers/admin_checklists.py` is a stub.
+    "EditorGroup": "plan task 28",
+    "EditorLine": "plan task 28",
+    "EditorLineCritical": "plan task 28",
+    "EditorLineDelete": "plan task 28",
+    "EditorLinePhoto": "plan task 28",
+    # The manager's schedule, plan task 29; `handlers/admin_schedule.py` is a stub.
+    "ShiftShow": "plan task 29",
+    "ShiftDelete": "plan task 29",
+    "ShiftMember": "plan task 29",
+    "ShiftOpener": "plan task 29",
+    "ShiftCloser": "plan task 29",
+}
+
+
+def _routed_factories(router: Router) -> set[str]:
+    """Every callback factory some handler of this tree filters on."""
+    found: set[str] = set()
+    for handler in router.callback_query.handlers:
+        for filter_object in handler.filters or ():
+            factory = getattr(filter_object.callback, "callback_data", None)
+            if isinstance(factory, type):
+                found.add(factory.__name__)
+    for sub in router.sub_routers:
+        found |= _routed_factories(sub)
+    return found
+
+
+def test_every_callback_factory_is_answered_by_somebody() -> None:
+    """A factory with a rule and no handler is a button that spins and does nothing.
+
+    `test_middlewares.py::test_every_callback_factory_has_a_rule` guards the other half —
+    that the resolver knows how to check a payload. Both halves are needed and neither
+    implies the other: `VenueCreate` had a rule from the day it was declared, was drawn on
+    the first screen a new installation ever shows (decision A3, the bootstrap owner with no
+    venue), and for the length of one wave no router filtered on it, because the module that
+    drew the button and the module that owned the wizard were written by different people
+    against different stand-ins. Every per-module test was green — a keyboard test asserts
+    the payload it packs, a handler test presses the payload it registers, and neither can
+    see that the two are not the same payload. Only the assembled tree can.
+    """
+    dispatcher = build_dispatcher(storage=MemoryStorage())
+    routed = _routed_factories(dispatcher)
+    dangling = {
+        name: reason
+        for factory in Callback.__subclasses__()
+        if (name := factory.__name__) not in routed
+        and (reason := UNROUTED.get(name, "nothing answers it")) == "nothing answers it"
+    }
+    assert not dangling, (
+        f"drawn but unanswered: {sorted(dangling)} — either register a handler, or add the "
+        "factory to UNROUTED with the task that owns it"
+    )
+    # And the allowlist does not outlive what it excuses: a factory that has since been
+    # wired up must leave it, or the next dangling button hides behind a stale entry.
+    assert not (stale := sorted(set(UNROUTED) & routed)), f"UNROUTED is stale for {stale}"
+
+
+def test_the_bot_parses_html() -> None:
+    """The parse mode the screens are written in, asserted because both directions break.
+
+    Off, and `INVITE_READY_TEMPLATE`'s `<code>` arrives as four literal characters while the
+    quoting in `src/bot/views/` turns «Rum & Cola» into «Rum &amp; Cola» on the screen. On,
+    and every screen has to quote — which is what `tests/bot/test_views_html.py` checks, and
+    what it would go on checking against nothing at all if this line were quietly dropped.
+    """
+    bot = build_bot("42:test-token")
+    assert bot.default.parse_mode == ParseMode.HTML
 
 
 # --------------------------------------------------------------------------------------

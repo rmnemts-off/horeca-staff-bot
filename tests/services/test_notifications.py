@@ -195,6 +195,11 @@ class FakeVenues:
     async def list_for_user(self, user_id: int) -> Sequence[Venue]:
         raise NotImplementedError
 
+    async def list_active(self) -> Sequence[Venue]:
+        # `VenueRepo.list_active`: a venue that was switched off keeps its queued rows but
+        # stops being polled, so the predicate belongs in the fake too.
+        return [venue for venue in self.table.values() if venue.is_active]
+
     async def create(self, *, name: str, city: str, timezone: str) -> Venue:
         raise NotImplementedError
 

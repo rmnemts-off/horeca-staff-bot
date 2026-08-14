@@ -198,6 +198,10 @@ class FakeVenues:
         ids = {row.venue_id for row in self.members.rows if row.user_id == user_id}
         return [row for row in self.store.rows if row.id in ids]
 
+    async def list_active(self) -> Sequence[Venue]:
+        # `VenueRepo.list_active`: switched-on venues only, membership not consulted.
+        return [row for row in self.store.rows if row.is_active]
+
     async def create(self, *, name: str, city: str, timezone: str) -> Venue:
         return self.store.add(name=name, city=city, timezone=timezone)
 
