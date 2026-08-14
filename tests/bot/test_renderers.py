@@ -17,11 +17,13 @@ renderer turns this file red rather than the customer's queue.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Final
 
 import pytest
+from src.bot import texts
 from src.bot.renderers import RenderDeps, stage_zero_registry, stage_zero_renderers
-from src.db.models import User
+from src.db.models import ChecklistType, Notification, NotificationStatus, User
 from src.services.notifications import NotificationType
 
 from tests.services.test_checklists import Harness
@@ -91,3 +93,120 @@ def test_each_type_gets_its_own_renderer() -> None:
     """
     functions = [renderer.__func__ for renderer in stage_zero_renderers(deps()).values()]  # type: ignore[attr-defined]
     assert len(set(functions)) == len(NotificationType)
+
+
+# --------------------------------------------------------------------------------------
+# The bodies (TZ 5.4, 6)
+# --------------------------------------------------------------------------------------
+#
+# The wiring above is one half of the seam. The other half is what the manager actually
+# reads, and nothing was asserting it: `_pending_block` could be deleted whole and three
+# thousand tests stayed green, because every test of these types checked the *payload* the
+# service wrote or the *escaping* of the text, and none of them checked that the lines
+# reached the message at all. TZ 6 escalates on the critical flag, so "the manager sees
+# which lines were skipped, critical ones first" is the requirement, not a detail.
+
+
+MANAGER_ID: Final = 5
+MANAGER_CHAT: Final = 500
+OPENER_ID: Final = 7
+OPENER_CHAT: Final = 700
+
+
+def people() -> FakeUsers:
+    return FakeUsers(
+        (
+            User(id=MANAGER_ID, telegram_id=MANAGER_CHAT, full_name="Olga"),
+            User(id=OPENER_ID, telegram_id=OPENER_CHAT, full_name="Anna"),
+        )
+    )
+
+
+def notification(notification_type: NotificationType, payload: dict[str, object]) -> Notification:
+    return Notification(
+        id=1,
+        venue_id=1,
+        user_id=MANAGER_ID,
+        chat_id=MANAGER_CHAT,
+        type=str(notification_type),
+        payload=payload,
+        scheduled_at=dt.datetime(2026, 8, 13, 5, 50, tzinfo=dt.UTC),
+        status=NotificationStatus.SENDING,
+    )
+
+
+def pending_payload(**extra: object) -> dict[str, object]:
+    """What `PendingItemsAlert` is written as — critical first, as the service ordered it."""
+    return {
+        "run_id": 3,
+        "checklist_type": ChecklistType.OPENING.value,
+        "user_id": OPENER_ID,
+        "items": [
+            {"item_id": 3, "text": "Ice well filled", "group_name": "Station", "is_critical": True},
+            {"item_id": 1, "text": "Napkins", "group_name": "Hall", "is_critical": False},
+        ],
+        **extra,
+    }
+
+
+async def render(notification_type: NotificationType, payload: dict[str, object]) -> str:
+    registry = stage_zero_registry(
+        RenderDeps(checklists=Harness(templates=[], items=[]).service, people=people())
+    )
+    message = await registry.render(notification(notification_type, payload))
+    assert message is not None
+    return message.text
+
+
+async def test_the_skipped_notification_shows_every_line_with_the_critical_one_first() -> None:
+    """TZ 5.4 and 6: what was left unticked, and which of it escalates."""
+    text = await render(NotificationType.CHECKLIST_SKIPPED, pending_payload(skip_comment="no ice"))
+
+    assert texts.NOTIFY_PENDING_TITLE in text
+    assert "Ice well filled" in text
+    assert "Napkins" in text
+    assert text.index("Ice well filled") < text.index("Napkins"), (
+        "the service ordered them critical-first and the renderer must not resort them"
+    )
+    assert texts.NOTIFY_PENDING_CRITICAL_LINE_TEMPLATE.format(text="Ice well filled") in text
+    assert "no ice" in text, "TZ 5.4: the reason the employee typed"
+
+
+async def test_the_overdue_notification_shows_the_same_lines() -> None:
+    text = await render(NotificationType.CHECKLIST_OVERDUE, pending_payload())
+
+    assert texts.NOTIFY_PENDING_TITLE in text
+    assert "Ice well filled" in text
+    assert "Napkins" in text
+
+
+async def test_a_notification_with_nothing_pending_prints_no_empty_heading() -> None:
+    """An alert whose list is empty is a heading over nothing, which reads as a bug."""
+    text = await render(NotificationType.CHECKLIST_SKIPPED, pending_payload(items=[]))
+
+    assert texts.NOTIFY_PENDING_TITLE not in text
+
+
+async def test_the_empty_template_notification_names_the_person_whose_shift_it_was() -> None:
+    """TZ 8.1: the employee got nothing, so the manager is told whose shift it was."""
+    text = await render(
+        NotificationType.CHECKLIST_TEMPLATE_EMPTY,
+        {
+            "checklist_type": ChecklistType.OPENING.value,
+            "template_id": 3,
+            "shift_id": 42,
+            "user_id": OPENER_ID,
+        },
+    )
+
+    assert "Anna" in text
+
+
+async def test_the_missing_recipe_notification_names_the_query_and_the_asker() -> None:
+    text = await render(
+        NotificationType.RECIPE_MISSING,
+        {"query": "negroni", "reported_by": OPENER_ID},
+    )
+
+    assert "negroni" in text
+    assert "Anna" in text
