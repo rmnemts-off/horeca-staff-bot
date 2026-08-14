@@ -58,7 +58,6 @@ from src.bot.views import admin as views
 from src.db.models import (
     ChecklistTemplate,
     MemberRole,
-    User,
     Venue,
     VenueMember,
     VenueSettings,
@@ -151,7 +150,7 @@ class FakeVenueService:
 
     async def create(
         self,
-        owner: User | int,
+        permit: Identity,
         *,
         name: str,
         city: str,
@@ -159,10 +158,14 @@ class FakeVenueService:
         default_shift_start: dt.time,
         default_shift_end: dt.time,
     ) -> VenueCreation:
-        assert isinstance(owner, User), "the wizard holds the users row it created on /start"
+        # The whole identity, not the row: the permission of decision A3 is checked inside
+        # the service, so the argument that reaches it has to carry one
+        # (`VenueCreationNotAllowedError`).
+        assert permit.may_create_venue, "the service refuses an identity that may not"
+        assert permit.user is not None, "decision A3 puts a users row in front of the wizard"
         self.created.append(
             {
-                "owner": owner.id,
+                "owner": permit.user.id,
                 "name": name,
                 "city": city,
                 "timezone": timezone,
@@ -181,7 +184,7 @@ class FakeVenueService:
         member = VenueMember(
             id=1,
             venue_id=VENUE_ID,
-            user_id=owner.id,
+            user_id=permit.user.id,
             role=MemberRole.OWNER,
             is_active=True,
         )
@@ -202,12 +205,12 @@ class FakeVenueService:
             member=member,
             templates=templates,
             owner=AccessContext(
-                user_id=owner.id,
-                telegram_id=owner.telegram_id,
+                user_id=permit.user.id,
+                telegram_id=permit.user.telegram_id,
                 venue_id=VENUE_ID,
                 member_id=member.id,
                 role=MemberRole.OWNER,
-                full_name=owner.full_name,
+                full_name=permit.user.full_name,
             ),
         )
         self.creations.append(creation)

@@ -50,7 +50,7 @@ from src.db.models import (
     VenueSettings,
 )
 from src.db.repositories.audit import AFTER_KEY, BEFORE_KEY
-from src.services.access import AccessContext, PermissionDeniedError
+from src.services.access import AccessContext, Identity, PermissionDeniedError
 from src.services.audit import AuditAction, AuditEntity
 from src.services.timezones import UnknownTimezoneError
 from src.services.venues import (
@@ -58,6 +58,7 @@ from src.services.venues import (
     UnknownOwnerError,
     UnknownVenueError,
     VenueCreation,
+    VenueCreationNotAllowedError,
     VenueCreationRepositories,
     VenueError,
     VenueService,
@@ -616,6 +617,10 @@ class Stand:
             telegram_id=next(self.telegram_ids),
         )
 
+    def permit(self, full_name: str = "Oleg") -> Identity:
+        """A bootstrap owner of decision A3: a person, belonging nowhere, allowed in."""
+        return permit_of(self.person(full_name))
+
     def audit_of(self, venue_id: int) -> list[Entry]:
         return self.repositories.audit(venue_id).entries
 
@@ -624,6 +629,11 @@ class Stand:
 def stand() -> Stand:
     repositories = FakeRepositories()
     return Stand(repositories=repositories, service=VenueService(repositories))
+
+
+def permit_of(user: User, *, allowed: bool = True) -> Identity:
+    """The identity the wizard is handed: who, and whether they may (decision A3)."""
+    return Identity(user=user, contexts=(), active=None, may_create_venue=allowed)
 
 
 async def open_venue(
@@ -635,7 +645,7 @@ async def open_venue(
 ) -> VenueCreation:
     """The wizard, run the way task 26 runs it."""
     return await stand.service.create(
-        stand.person(owner_name),
+        permit_of(stand.person(owner_name)),
         name=name,
         city="Moscow",
         timezone=zone,
@@ -724,32 +734,43 @@ async def test_an_unknown_timezone_is_refused_before_anything_is_written(stand: 
     assert stand.repositories.audit_store == []
 
 
-async def test_the_owner_may_be_given_as_an_id_and_an_unknown_one_is_refused(
+async def test_an_identity_that_may_not_create_a_venue_is_refused_by_the_service(
     stand: Stand,
 ) -> None:
-    """Both callers exist: the wizard holds the row, a future admin holds only the id."""
-    user = stand.person("Oleg")
+    """The check is here and not only in the screen that draws the wizard.
 
-    creation = await stand.service.create(
-        user.id,
-        name="Invasion",
-        city="Moscow",
-        timezone=MOSCOW,
-        default_shift_start=SHIFT_START,
-        default_shift_end=SHIFT_END,
-    )
-    assert creation.owner.user_id == user.id
+    `VenueService` sits in the handler context of every update, so a handler written at
+    stage 1 that calls it without asking would let ordinary `staff` raise venues — and
+    nothing in the type system would notice, because a bare `User` argument carries no
+    permission at all. That is why the parameter is the whole `Identity` (decision A3).
+    """
+    user = stand.person("Sam")
 
-    with pytest.raises(UnknownOwnerError):
+    with pytest.raises(VenueCreationNotAllowedError):
         await stand.service.create(
-            4_242,
+            permit_of(user, allowed=False),
             name="Ghost",
             city="Moscow",
             timezone=MOSCOW,
             default_shift_start=SHIFT_START,
             default_shift_end=SHIFT_END,
         )
-    assert len(stand.repositories.venue_store.rows) == 1
+
+    assert stand.repositories.venue_store.rows == [], "nothing may be written before the check"
+
+
+async def test_a_permit_without_a_person_behind_it_is_refused(stand: Stand) -> None:
+    """Decision A3 puts a `users` row in front of the wizard: `/start` creates it first."""
+    with pytest.raises(UnknownOwnerError):
+        await stand.service.create(
+            Identity(user=None, contexts=(), active=None, may_create_venue=True),
+            name="Ghost",
+            city="Moscow",
+            timezone=MOSCOW,
+            default_shift_start=SHIFT_START,
+            default_shift_end=SHIFT_END,
+        )
+    assert stand.repositories.venue_store.rows == []
 
 
 async def test_a_blank_name_or_city_is_refused_rather_than_written(stand: Stand) -> None:
@@ -760,7 +781,7 @@ async def test_a_blank_name_or_city_is_refused_rather_than_written(stand: Stand)
 
 async def test_the_name_and_the_city_are_trimmed(stand: Stand) -> None:
     creation = await stand.service.create(
-        stand.person("Oleg"),
+        stand.permit(),
         name="  Invasion  ",
         city="  Moscow  ",
         timezone=MOSCOW,

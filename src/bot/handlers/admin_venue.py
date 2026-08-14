@@ -217,8 +217,11 @@ async def take_window(event: Message, **data: Any) -> None:
 
     service: VenueService = data[VENUE_WIZARD_KEY]
     start, end = window
+    # The identity and not the row: the service checks `may_create_venue` itself, so the
+    # guard above is the screen being honest early rather than the only thing standing
+    # between `staff` and a new venue (see `VenueCreationNotAllowedError`).
     creation = await service.create(
-        identity.user,
+        identity,
         name=name,
         city=city,
         timezone=timezone,

@@ -71,6 +71,7 @@ from src.db.repositories.protocols import (
 from src.services.access import (
     AccessContext,
     AccessError,
+    Identity,
     _context,
     require_manager,
     require_venue,
@@ -104,15 +105,41 @@ class VenueError(AccessError):
 
 
 class UnknownOwnerError(VenueError):
-    """The wizard was handed a `users.id` that no row answers to.
+    """The identity handed to the wizard carries no `users` row.
 
     Decision A3 puts a `users` row in front of the wizard — `/start` from a bootstrap id
     creates the person first — so this is a caller mistake, not a state the flow can reach.
     """
 
-    def __init__(self, user_id: int) -> None:
-        super().__init__(f"user {user_id} does not exist, so the venue would have no owner")
-        self.user_id = user_id
+    def __init__(self, telegram_id: int | None = None) -> None:
+        super().__init__(
+            f"identity {telegram_id} has no users row, so the venue would have no owner"
+        )
+        self.telegram_id = telegram_id
+
+
+class VenueCreationNotAllowedError(VenueError):
+    """Somebody who may not raise a venue asked to (decision A3).
+
+    Every *other* right in this project is read off `venue_members` (TZ 2), and this is the
+    one call for which that cannot work: it runs before the first membership exists. The
+    permission is therefore `Identity.may_create_venue`, computed once by `AccessService` —
+    the bootstrap trigger of `OWNER_TELEGRAM_IDS`, spent the moment the person belongs
+    anywhere.
+
+    It is checked **here** rather than in the handler that draws the wizard, and that is the
+    whole reason this error exists. A check that lives only in a screen is a check the next
+    screen does not have: `VenueService` sits in the handler context of *every* update, so a
+    handler written at stage 1 that calls it without asking would let ordinary `staff` raise
+    venues, and nothing in the type system or the tests would notice.
+    """
+
+    def __init__(self, telegram_id: int | None = None) -> None:
+        super().__init__(
+            f"identity {telegram_id} may not create a venue: rights are read from "
+            f"venue_members (TZ 2), and the bootstrap trigger of decision A3 is spent"
+        )
+        self.telegram_id = telegram_id
 
 
 class UnknownVenueError(VenueError):
@@ -302,7 +329,7 @@ class VenueService:
 
     async def create(
         self,
-        owner: User | int,
+        permit: Identity,
         *,
         name: str,
         city: str,
@@ -312,21 +339,21 @@ class VenueService:
     ) -> VenueCreation:
         """Raise a venue from nothing, in one transaction the caller commits (task 26).
 
-        Takes the owner as a row or as a `users.id` because both callers exist: the wizard
-        holds the `User` it created on `/start` (decision A3), and a future web admin will
-        hold only an id.
-
-        There is no permission check and that is deliberate. Rights are read from
-        `venue_members` (TZ 2) and this call is what creates the first such row, so there is
-        nothing yet to check against; who is allowed to reach the wizard at all is decided
-        one layer up by `Identity.may_create_venue`, which spends the `OWNER_TELEGRAM_IDS`
-        trigger the moment the person belongs anywhere (decision A3).
+        **Takes the whole `Identity` and not the owner row, because the permission is the
+        first thing this call has to decide.** Rights everywhere else in this project are
+        read from `venue_members` (TZ 2), and this is the one call for which that cannot
+        work — it writes the first such row. The answer is `Identity.may_create_venue`,
+        which `AccessService` has already computed from the bootstrap trigger of decision
+        A3, and asking for the identity rather than for a bare `User` is what makes the
+        check impossible to skip: there is no argument shape that carries an owner and not
+        a permission. See :class:`VenueCreationNotAllowedError` for why the handler alone
+        was not enough.
 
         The order of the writes is the order of the foreign keys: the venue first, then
         everything that points at it. The audit records come last, once there is a venue to
         record into and an owner context to sign them with.
         """
-        user = await self._require_user(owner)
+        user = self._require_permit(permit)
         # Validated before the first write: an unknown zone must not leave a half-built
         # venue behind for the caller's rollback to clean up (TZ 3.4).
         venue_timezone(timezone)
@@ -401,13 +428,15 @@ class VenueService:
 
     # -- internals -----------------------------------------------------------------------
 
-    async def _require_user(self, owner: User | int) -> User:
-        if isinstance(owner, User):
-            return owner
-        user = await self.repositories.users.get(owner)
-        if user is None:
-            raise UnknownOwnerError(owner)
-        return user
+    @staticmethod
+    def _require_permit(permit: Identity) -> User:
+        """The owner behind an identity that is allowed to raise a venue, or a refusal."""
+        telegram_id = None if permit.user is None else permit.user.telegram_id
+        if not permit.may_create_venue:
+            raise VenueCreationNotAllowedError(telegram_id)
+        if permit.user is None:
+            raise UnknownOwnerError(telegram_id)
+        return permit.user
 
     async def _create_empty_templates(
         self,
@@ -542,6 +571,7 @@ __all__ = [
     "UnknownVenueError",
     "VenueConfiguration",
     "VenueCreation",
+    "VenueCreationNotAllowedError",
     "VenueCreationRepositories",
     "VenueError",
     "VenueService",
