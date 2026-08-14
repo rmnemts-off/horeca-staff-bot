@@ -29,15 +29,34 @@ import re
 from typing import Final
 
 import pytest
-from src.bot.views import admin, checklist, onboarding, quoted, recipes, shifts, staff
-from src.db.models import MemberRole, Venue, VenueSettings
+from src.bot.renderers import StageZeroRenderers
+from src.bot.views import (
+    admin,
+    checklist,
+    editor,
+    onboarding,
+    quoted,
+    recipe_form,
+    recipes,
+    schedule,
+    shifts,
+    staff,
+)
+from src.db.models import ChecklistType, MemberRole, Venue, VenueSettings
 from src.services.access import InviteRejection
+from src.services.notifications import NotificationType
+from src.services.shifts import ShiftRole, ShiftWarning
+from src.services.templates import TemplateGroupView, TemplateItemView, TemplateView
 from src.services.venues import VenueConfiguration
 
+from tests.bot.test_admin_schedule import make_entry as make_roster_entry
+from tests.bot.test_admin_schedule import make_view as make_shift_view
 from tests.bot.test_admin_staff import make_entry
 from tests.bot.test_checklist import group, item, run_view
 from tests.bot.test_menu import make_shift, view_of
 from tests.bot.test_recipes_screen import make_card, make_hit, make_line, make_page
+from tests.bot.test_renderers import deps
+from tests.test_worker import make_notification
 
 #: Text as hostile as a venue can make it without trying: an ampersand (Telegram reads it as
 #: the start of an entity), a `<` that opens a tag it does not know, and a stray `>`.
@@ -233,3 +252,151 @@ def test_recipe_screens_survive_hostile_text() -> None:
     assert_telegram_html(recipes.results(page).text)
     assert_telegram_html(recipes.results(make_page(query=HOSTILE)).text)
     assert_telegram_html(recipes.section([HOSTILE]).text)
+
+
+def hostile_template() -> TemplateView:
+    """A checklist whose every word came out of the venue: group names and lines alike."""
+    line = TemplateItemView(
+        item_id=1,
+        text=HOSTILE,
+        group_index=0,
+        group_name=HOSTILE,
+        order_index=0,
+        is_critical=True,
+        requires_photo=True,
+        requires_comment=False,
+    )
+    second = TemplateItemView(
+        item_id=2,
+        text=HOSTILE,
+        group_index=1,
+        group_name=None,
+        order_index=0,
+        is_critical=False,
+        requires_photo=False,
+        requires_comment=False,
+    )
+    return TemplateView(
+        template_id=5,
+        checklist_type=ChecklistType.OPENING,
+        name=HOSTILE,
+        version=2,
+        is_active=True,
+        groups=(
+            TemplateGroupView(index=0, name=HOSTILE, items=(line,)),
+            TemplateGroupView(index=1, name=None, items=(second,)),
+        ),
+    )
+
+
+def test_checklist_editor_screens_survive_hostile_text() -> None:
+    """TZ 5.8, task 28: the manager types these lines, so the manager can type a `<`."""
+    view = hostile_template()
+    assert_telegram_html(editor.template_screen(view).text)
+    assert_telegram_html(editor.template_screen(view, group_index=1).text)
+    assert_telegram_html(
+        editor.template_screen(view, notice=editor.bulk_notice(added=2, groups=2, version=3)).text
+    )
+    assert_telegram_html(editor.item_screen(view, view.items[0]).text)
+    assert_telegram_html(editor.text_prompt(view).text)
+    assert_telegram_html(editor.group_prompt(view).text)
+    assert_telegram_html(editor.bulk_prompt(view).text)
+    empty = TemplateView(
+        template_id=None,
+        checklist_type=ChecklistType.OPENING,
+        name=None,
+        version=None,
+        is_active=False,
+        groups=(),
+    )
+    assert_telegram_html(editor.template_screen(empty).text)
+
+
+def test_schedule_admin_screens_survive_hostile_text() -> None:
+    """TZ 5.3, 5.8, task 29: every line of the graph is somebody's name."""
+    mine = make_shift_view(1, full_name=HOSTILE, is_opener=True)
+    theirs = make_shift_view(2, user_id=108, full_name=HOSTILE)
+    assert_telegram_html(schedule.schedule_screen([mine, theirs]).text)
+    assert_telegram_html(
+        schedule.schedule_screen([], warnings=[ShiftWarning.NO_OPENER]).text,
+    )
+    assert_telegram_html(schedule.shift_screen(mine).text)
+    assert_telegram_html(schedule.shift_screen(mine, warnings=[ShiftWarning.NO_OPENER]).text)
+    assert_telegram_html(schedule.shift_screen(mine, taken=ShiftRole.OPENER, taken_by=HOSTILE).text)
+    assert_telegram_html(schedule.person_step([make_roster_entry(full_name=HOSTILE)]).text)
+    assert_telegram_html(schedule.person_step([]).text)
+    assert_telegram_html(schedule.date_step().text)
+    assert_telegram_html(
+        schedule.window_step(member_id=7, start=dt.time(8, 0), end=dt.time(23, 0)).text
+    )
+
+
+def test_recipe_form_screens_survive_hostile_text() -> None:
+    """TZ 5.5, task 30a: the name and the category the manager typed, echoed back."""
+    assert_telegram_html(recipe_form.section([HOSTILE, HOSTILE]).text)
+    assert_telegram_html(recipe_form.section([]).text)
+    assert_telegram_html(recipe_form.category_step([HOSTILE]).text)
+    assert_telegram_html(recipe_form.name_step().text)
+    assert_telegram_html(recipe_form.composition_step().text)
+    card = make_card(
+        name=HOSTILE,
+        category=HOSTILE,
+        glassware=HOSTILE,
+        method=HOSTILE,
+        ice=HOSTILE,
+        garnish=HOSTILE,
+        instruction=HOSTILE,
+        ingredients=[make_line(HOSTILE, qty_text=HOSTILE)],
+    )
+    assert_telegram_html(recipe_form.saved(card).text)
+    assert_telegram_html(recipe_form.exists(name=HOSTILE, category=HOSTILE, recipe_id=1).text)
+
+
+async def test_notification_bodies_survive_hostile_text() -> None:
+    """TZ 6, task 31: a push is an HTML message too, and nothing here is a screen a
+    handler drew.
+
+    The manager's four types are built from `payload` — a snapshot of the venue's own
+    checklist lines and of the words an employee typed into a skip comment or a search box.
+    A `<` in any of them is the same outage as one on a screen, except that nobody is
+    looking: the row is marked `failed` in a table and the manager is simply never told
+    the checklist was skipped.
+    """
+    renderers = StageZeroRenderers(deps())
+    pending = {
+        "checklist_type": ChecklistType.OPENING.value,
+        "user_id": None,
+        "items": [
+            {"text": HOSTILE, "group_name": HOSTILE, "is_critical": True},
+            {"text": HOSTILE, "group_name": HOSTILE, "is_critical": False},
+            {"text": HOSTILE, "group_name": None, "is_critical": False},
+        ],
+        "skip_comment": HOSTILE,
+    }
+    skipped = await renderers.checklist_skipped(
+        make_notification(1, notification_type=NotificationType.CHECKLIST_SKIPPED, payload=pending)
+    )
+    assert_telegram_html(skipped.text)
+
+    overdue = await renderers.checklist_overdue(
+        make_notification(2, notification_type=NotificationType.CHECKLIST_OVERDUE, payload=pending)
+    )
+    assert_telegram_html(overdue.text)
+
+    empty = await renderers.checklist_template_empty(
+        make_notification(
+            3,
+            notification_type=NotificationType.CHECKLIST_TEMPLATE_EMPTY,
+            payload={"checklist_type": ChecklistType.OPENING.value},
+        )
+    )
+    assert_telegram_html(empty.text)
+
+    missing = await renderers.recipe_missing(
+        make_notification(
+            4,
+            notification_type=NotificationType.RECIPE_MISSING,
+            payload={"query": HOSTILE, "reported_by": None},
+        )
+    )
+    assert_telegram_html(missing.text)

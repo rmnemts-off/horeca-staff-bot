@@ -120,6 +120,10 @@ EDITOR_NEW_VERSION_TEMPLATE: Final = (
 
 CARD_EDITOR_TITLE: Final = "Рецептуры"
 CARD_EDITOR_EMPTY: Final = "Пока ничего нет. Добавьте первую карту."
+#: What the venue has entered so far, read off the categories it has actually used —
+#: `RecipeService` counts nothing yet, and a category is the half of the key of decision D6
+#: that a manager recognises the section by.
+CARD_EDITOR_GROUPS_TEMPLATE: Final = "Категории: {groups}"
 CARD_ADD_BUTTON: Final = "Добавить"
 CARD_NAME_PROMPT: Final = "Название?"
 CARD_GROUP_PROMPT: Final = "Категория?"
@@ -133,6 +137,10 @@ CARD_GARNISH_PROMPT: Final = "Гарниш? Можно пропустить."
 CARD_INSTRUCTION_PROMPT: Final = "Приготовление? Можно пропустить."
 #: TZ 5.8: «изменённая рецептура немедленно доступна всем сотрудникам».
 CARD_SAVED: Final = "Сохранил. Уже видно всей смене."
+#: Decision D6: one name per category, and a second card carrying that key is refused
+#: instead of overwriting the first. The manager has just typed a whole card, so the refusal
+#: names what is already there and the screen offers to open it.
+CARD_EXISTS_TEMPLATE: Final = "«{name}» в категории «{category}» уже есть."
 
 # --------------------------------------------------------------------------------------
 # Venue: the wizard and the settings (TZ 5.8; plan tasks 26 and 30)
@@ -183,7 +191,9 @@ __all__ = [
     "CARD_ADD_BUTTON",
     "CARD_COMPOSITION_PROMPT",
     "CARD_EDITOR_EMPTY",
+    "CARD_EDITOR_GROUPS_TEMPLATE",
     "CARD_EDITOR_TITLE",
+    "CARD_EXISTS_TEMPLATE",
     "CARD_GARNISH_PROMPT",
     "CARD_GLASSWARE_PROMPT",
     "CARD_GROUP_PROMPT",

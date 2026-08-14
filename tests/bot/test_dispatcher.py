@@ -23,7 +23,9 @@ half carries `@pytest.mark.db`: CI has Redis, a laptop may not.
 from __future__ import annotations
 
 import datetime as dt
+import pkgutil
 import uuid
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
@@ -37,7 +39,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.methods import SendMessage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, Update
-from src.bot import handlers, routers, texts
+from src.bot import handlers, keyboards, routers, texts
 from src.bot.callbacks import Callback, MenuAction, MenuKeep, OpenSection
 from src.bot.dispatcher import (
     FSM_KEY_PREFIX,
@@ -46,6 +48,9 @@ from src.bot.dispatcher import (
     build_dispatcher,
     build_storage,
 )
+from src.bot.keyboards.admin import VenueCommand
+from src.bot.keyboards.recipe_form import CATEGORY_BASE, CATEGORY_LIMIT, RecipeCommand
+from src.bot.keyboards.schedule import ScheduleCommand
 from src.bot.middlewares.activity import LastSeenMiddleware
 from src.bot.middlewares.auth import ACTOR_KEY, AuthMiddleware
 from src.bot.middlewares.errors import ErrorsMiddleware
@@ -128,18 +133,9 @@ UNROUTED: Final = {
     # Answered by `src/bot/middlewares/menu.py`, above routing, so that "carry on" cannot be
     # outranked by a state-filtered handler. It is drawn by that middleware and nothing else.
     "MenuKeep": "handled by MenuInterceptMiddleware, not by a router",
-    # The checklist template editor, plan task 28; `handlers/admin_checklists.py` is a stub.
-    "EditorGroup": "plan task 28",
-    "EditorLine": "plan task 28",
-    "EditorLineCritical": "plan task 28",
-    "EditorLineDelete": "plan task 28",
-    "EditorLinePhoto": "plan task 28",
-    # The manager's schedule, plan task 29; `handlers/admin_schedule.py` is a stub.
-    "ShiftShow": "plan task 29",
-    "ShiftDelete": "plan task 29",
-    "ShiftMember": "plan task 29",
-    "ShiftOpener": "plan task 29",
-    "ShiftCloser": "plan task 29",
+    # The five `Editor*` factories left this list with plan task 28 and the five `Shift*`
+    # ones with task 29: `admin_checklists.py` and `admin_schedule.py` now register a
+    # handler for each of them.
 }
 
 
@@ -184,6 +180,70 @@ def test_every_callback_factory_is_answered_by_somebody() -> None:
     # And the allowlist does not outlive what it excuses: a factory that has since been
     # wired up must leave it, or the next dangling button hides behind a stale entry.
     assert not (stale := sorted(set(UNROUTED) & routed)), f"UNROUTED is stale for {stale}"
+
+
+#: The other half of the same seam: `TimezoneChoice` is the one factory in the scheme that
+#: carries a bare integer and needs no actor, so three blocks borrow it for presses
+#: `src/bot/callbacks.py` declares no factory for. Each block took a slice of the negative
+#: indices and each documented its own slice; nothing compared the slices to each other,
+#: because they were written in parallel by people reading different files.
+BORROWED_INDICES: Final[dict[str, set[int]]] = {
+    # `src/bot/keyboards/admin.py`: the three settings-edit buttons of the venue block.
+    "admin": {command.value for command in VenueCommand},
+    # `src/bot/keyboards/schedule.py`: «Добавить смену», which starts the shift wizard.
+    "schedule": {command.value for command in ScheduleCommand},
+    # `src/bot/keyboards/recipe_form.py`: open the form, skip a step, and one index per
+    # category offered on the page held in the FSM.
+    "recipe_form": {command.value for command in RecipeCommand}
+    | {CATEGORY_BASE - offered for offered in range(CATEGORY_LIMIT)},
+}
+
+
+def test_no_two_blocks_borrow_the_same_timezone_index() -> None:
+    """A collision here is silent, and it routes one block's button into another's handler.
+
+    Nothing fails at import, nothing fails at registration: both handlers filter the same
+    factory on the same integer, and the router included first — `admin_venue`, then
+    `admin_schedule`, then `admin_recipes` — simply answers. The manager presses «Добавить
+    смену» and lands on a settings screen. The per-module tests cannot see it; each of them
+    knows its own slice and the one it was written against, which is exactly how -29 and
+    -101 came to be chosen against different neighbours.
+    """
+    for block, indices in BORROWED_INDICES.items():
+        assert indices, f"{block} declares a slice and puts nothing in it"
+        assert all(index < 0 for index in indices), (
+            f"{block} borrows a non-negative index — `services.venues.timezone_at` answers "
+            "for those, so the press is indistinguishable from a real zone"
+        )
+    for block, indices in BORROWED_INDICES.items():
+        for other, theirs in BORROWED_INDICES.items():
+            if other <= block:
+                continue
+            assert not (clash := indices & theirs), (
+                f"{block} and {other} both borrow {sorted(clash)}; whichever router is "
+                "included first will answer both blocks' buttons"
+            )
+
+
+def test_every_block_that_borrows_the_factory_declares_its_slice() -> None:
+    """The list above must not go stale the way a fourth block would make it.
+
+    `BORROWED_INDICES` is only a guard while it names every borrower, so the borrowers are
+    discovered from the source rather than remembered: a keyboard module that packs a
+    `TimezoneChoice` itself is either drawing real zones (the venue wizard's pager, which is
+    what the factory is *for*) or borrowing the negative half, and either way it belongs in
+    the dict above with the slice it took.
+    """
+    packers = {
+        info.name
+        for info in pkgutil.iter_modules(keyboards.__path__)
+        if "TimezoneChoice(index=" in Path(keyboards.__path__[0], f"{info.name}.py").read_text()
+    }
+    assert packers == set(BORROWED_INDICES), (
+        f"packing a TimezoneChoice but not in BORROWED_INDICES: "
+        f"{sorted(packers - set(BORROWED_INDICES))}; declared but no longer packing one: "
+        f"{sorted(set(BORROWED_INDICES) - packers)}"
+    )
 
 
 def test_the_bot_parses_html() -> None:
