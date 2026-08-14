@@ -165,6 +165,17 @@ class NaiveMomentError(AccessError):
         self.moment = moment
 
 
+class BootstrapNotAllowedError(AccessError):
+    """Somebody who is not in `OWNER_TELEGRAM_IDS` asked to be made the first owner."""
+
+    def __init__(self, telegram_id: int) -> None:
+        super().__init__(
+            f"telegram id {telegram_id} is not a bootstrap owner (decision A3), so no "
+            f"users row is created for it"
+        )
+        self.telegram_id = telegram_id
+
+
 class InviteCodeGenerationError(AccessError):
     """Several fresh secrets in a row collided with an existing code."""
 
@@ -436,6 +447,46 @@ class AccessService:
             active=self._pick_active(user, contexts),
             # Decision A3: the trigger is spent as soon as the person belongs anywhere.
             may_create_venue=telegram_id in self.bootstrap_owner_ids and not contexts,
+        )
+
+    async def ensure_bootstrap_user(
+        self,
+        *,
+        telegram_id: int,
+        full_name: str,
+        username: str | None = None,
+    ) -> User:
+        """Decision A3, word for word: `/start` from a bootstrap id makes the `users` row.
+
+        **Without this a new installation cannot start at all**, and that is not a figure of
+        speech: rights are read from `venue_members` (TZ 2), the first such row is written by
+        the create-venue wizard, and the wizard needs a `users` row to point at. Nothing else
+        creates one — :meth:`activate_invite_code` does, but a code can only be issued from
+        inside a venue that does not exist yet. So the very first person pressed the one button
+        the screen had and was refused, which is criterion 11.6 failing on an empty database.
+
+        It was invisible to every test because the tests supplied the row: the fixture named
+        it "`/start` made the `users` row" and made it itself, which is a belief about the
+        code rather than an observation of it. A live stack found it in a minute.
+
+        **Only a bootstrap id.** The check is here and not in the caller for the usual
+        reason: the service holds the trigger (`OWNER_TELEGRAM_IDS`), and a method that
+        created a user for anybody who asked would be a way into the one table the gate of
+        TZ 5.1 protects. Idempotent — a second `/start` returns the row rather than a second
+        one — and it grants nothing on its own: a `users` row without a `venue_members` row
+        opens no screen but this wizard.
+
+        The name comes from the Telegram profile, which is the only source there is: the
+        owner arrives without an invite code, and decision B8's objection to profile names
+        is about matching an imported schedule to employees, not about the person creating
+        the venue in the first place.
+        """
+        if telegram_id not in self.bootstrap_owner_ids:
+            raise BootstrapNotAllowedError(telegram_id)
+        return await self._upsert_user(
+            telegram_id=telegram_id,
+            full_name=full_name.strip() or str(telegram_id),
+            username=username,
         )
 
     async def context_for(self, telegram_id: int, venue_id: int) -> AccessContext | None:
@@ -752,6 +803,7 @@ __all__ = [
     "AccessError",
     "AccessRepositories",
     "AccessService",
+    "BootstrapNotAllowedError",
     "Identity",
     "InviteActivation",
     "InviteCodeGenerationError",

@@ -127,6 +127,20 @@ class FakeAccess:
         self.joined: list[tuple[str, int, str]] = []
         self.selected: list[tuple[int, int]] = []
         self.asked_for_names: list[tuple[int, ...]] = []
+        #: Decision A3: `/start` from a bootstrap id writes the `users` row. Recorded here
+        #: because nothing else in the product writes one for the first owner, and a fake
+        #: that answered without recording would let the call be dropped again.
+        self.bootstrapped: list[tuple[int, str, str | None]] = []
+
+    async def ensure_bootstrap_user(
+        self,
+        *,
+        telegram_id: int,
+        full_name: str,
+        username: str | None = None,
+    ) -> User:
+        self.bootstrapped.append((telegram_id, full_name, username))
+        return User(id=telegram_id, telegram_id=telegram_id, full_name=full_name, is_active=True)
 
     async def preview_invite_code(self, raw_code: str, *, now: dt.datetime) -> InvitePreview:
         assert now.tzinfo is not None, "decision D12: every instant crossing a service is aware"
@@ -610,6 +624,40 @@ async def test_the_bootstrap_owner_is_offered_the_only_thing_there_is_to_do() ->
     (sent,) = sends(at.bot)
     assert sent.text == texts.ONBOARDING_CREATE_VENUE_OFFER
     assert payloads_of(sent.reply_markup) == [VenueCreate().pack()]
+
+
+async def test_the_bootstrap_owner_gets_a_users_row_before_the_wizard_asks_anything() -> None:
+    """Decision A3 in full: `/start` from a bootstrap id **creates the `users` row**.
+
+    This is the assertion the product went a whole wave without, and the cost was total:
+    nothing else writes a `users` row for the first owner (`activate_invite_code` does, but
+    a code can only be issued from inside a venue that does not exist yet), and the wizard
+    refuses an identity with no user behind it. So on a brand-new installation the owner
+    pressed the one button the screen had and was told the action was unavailable —
+    criterion 11.6 failing on an empty database, with every venue, employee and checklist
+    behind it unreachable.
+
+    No unit test could see it: the fixtures of `tests/bot/test_admin_venue.py` build the
+    identity *with* a user and call that "`/start` made the row". A live stack found it in
+    a minute, which is the point of criterion 11.6 asking for a live stack.
+    """
+    at = stand(access=FakeAccess(venues={}), identity=stranger(may_create_venue=True))
+    message = make_message("/start", telegram_id=MANAGER_TELEGRAM_ID, bot=at.bot)
+
+    await handlers.start(message, **at.context())
+
+    assert at.access.bootstrapped == [(MANAGER_TELEGRAM_ID, "X", None)], (
+        "the row is written on /start, so the wizard has an owner to point at"
+    )
+
+
+async def test_nobody_else_gets_a_users_row_from_pressing_start() -> None:
+    """The row is the bootstrap trigger's, not a side effect of saying hello (TZ 5.1)."""
+    at = stand(access=FakeAccess(venues={}), identity=stranger())
+
+    await handlers.start(make_message("/start", bot=at.bot), **at.context())
+
+    assert at.access.bootstrapped == []
 
 
 async def test_nothing_is_said_to_somebody_the_gate_would_not_have_let_through() -> None:

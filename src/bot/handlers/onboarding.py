@@ -127,7 +127,34 @@ async def start(message: Message, **data: Any) -> None:
         return
     if identity.may_create_venue:
         # Decision A3, and the empty state of TZ 8.1: there is no venue in the database yet.
+        # The `users` row is written here and not by the wizard, because the wizard's first
+        # question is the venue's name and by then the person must already exist to own it.
+        who = message.from_user
+        if who is None:
+            # The gate refuses an update with nobody behind it, so this cannot happen; it is
+            # spelled out because `from_user` is optional in the Bot API and mypy is right.
+            return
+        access: AccessService = data[ACCESS_KEY]
+        await access.ensure_bootstrap_user(
+            telegram_id=who.id,
+            full_name=_profile_name(message),
+            username=who.username,
+        )
         await _send(message, views.venue_missing())
+
+
+def _profile_name(message: Message) -> str:
+    """The name the first owner arrives with — their Telegram profile.
+
+    The only source there is: they have no invite code, and the wizard asks for the venue's
+    name rather than for theirs. Decision B8 keeps profile names away from *employees*,
+    because an imported schedule is matched to people by full name; the person creating the
+    venue is matched to nothing.
+    """
+    who = message.from_user
+    if who is None:
+        return ""
+    return " ".join(part for part in (who.first_name, who.last_name) if part)
 
 
 async def by_code(message: Message, **data: Any) -> None:
