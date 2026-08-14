@@ -23,7 +23,9 @@ from __future__ import annotations
 import datetime as dt
 from typing import Final
 
-from aiogram import Dispatcher
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
 
@@ -46,6 +48,24 @@ def build_storage(redis_url: str, *, ttl: dt.timedelta = FSM_TTL) -> RedisStorag
         state_ttl=ttl,
         data_ttl=ttl,
     )
+
+
+def build_bot(token: str) -> Bot:
+    """The bot of either process, with the parse mode the screens are written in.
+
+    **HTML is a decision of the whole process, not of the two texts that need it.** The parse
+    mode is a property of the bot, so it cannot be turned on for one message: the moment
+    `INVITE_READY_TEMPLATE` wants `<code>` around a code so it can be tapped to copy, and
+    `TTK_CARD_NAME_TEMPLATE` wants `<b>` around a drink, every other screen is HTML too. What
+    follows is the quoting rule in `src/bot/views/__init__.py`, and it is not optional — with
+    the mode on and a venue named «Rum & Cola» unquoted, Telegram refuses the whole message
+    rather than mangling one word, and the employee is shown nothing.
+
+    A function rather than a line in `__main__.py` because the notification worker (plan task
+    31) is a second process that sends the same screens, and a second `Bot(...)` written
+    there without this would send them raw.
+    """
+    return Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 
 def build_dispatcher(
@@ -77,6 +97,7 @@ def build_dispatcher(
 __all__ = [
     "FSM_KEY_PREFIX",
     "FSM_TTL",
+    "build_bot",
     "build_dispatcher",
     "build_storage",
 ]

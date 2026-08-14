@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import asyncio
 
-from aiogram import Bot
-
-from src.bot.dispatcher import build_dispatcher, build_storage
+from src.bot.dispatcher import build_bot, build_dispatcher, build_storage
 from src.config import settings
 from src.db.session import dispose_engine
 from src.logging import configure_logging, get_logger
@@ -33,7 +31,7 @@ async def run() -> None:
     """Start polling and keep polling until the process is asked to stop."""
     settings.require("bot_token", "database_url", "redis_url")
 
-    bot = Bot(token=settings.bot_token)
+    bot = build_bot(settings.bot_token)
     storage = build_storage(settings.redis_url)
     dispatcher = build_dispatcher(
         storage=storage,
