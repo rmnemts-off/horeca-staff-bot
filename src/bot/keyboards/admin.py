@@ -28,7 +28,6 @@ is what the index means, which is why that enum is documented as append-only.
 
 from __future__ import annotations
 
-import enum
 from collections.abc import Sequence
 from typing import Final
 
@@ -36,6 +35,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot import texts
 from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
     AdminSection,
     MenuAction,
     Nav,
@@ -49,47 +50,6 @@ from src.bot.keyboards.menu import navigation_row, submenu, wizard
 #: How many zone buttons share a row. Two, because an IANA name is long and three of them
 #: are cut on a phone (TZ 8.2).
 TIMEZONE_COLUMNS: Final = 2
-
-
-class VenueCommand(enum.IntEnum):
-    """A press of this block that names no zone.
-
-    `CREATE` travels on its own factory, :class:`~src.bot.callbacks.VenueCreate` — the same
-    payload `src/bot/keyboards/onboarding.py` draws on the "there is no venue yet" screen of
-    decision A3, so the two entrances into the wizard are one button with one handler rather
-    than two spellings of it.
-
-    **The three edit buttons are still a stopgap.** They need a payload of their own and
-    `src/bot/callbacks.py` declares none: every factory there is either taken by another
-    module, or requires an actor. Declaring a factory in this file is not an option either —
-    a subclass of `Callback` registers itself by being declared, and the resolver refuses a
-    factory with no rule (`tests/bot/test_middlewares.py::test_every_callback_factory_has_a_rule`).
-
-    So those three presses travel on the one factory this block owns outright,
-    :class:`~src.bot.callbacks.TimezoneChoice`, at indices that can never name a zone:
-    :func:`~src.services.venues.timezone_at` answers `None` for anything below zero, so a
-    command and a zone cannot be mistaken for each other in either direction. The moment
-    `callbacks.py` gains a `SettingsField(field=…)`, the negative indices go away and the
-    three registrations in `src/bot/handlers/admin_venue.py` change factory.
-    """
-
-    CREATE = -1
-    EDIT_TIMEZONE = -2
-    EDIT_LEAD_MINUTES = -3
-    EDIT_WINDOW = -4
-
-
-def command(action: VenueCommand) -> str:
-    """The payload of one of the four buttons above (see :class:`VenueCommand`)."""
-    if action is VenueCommand.CREATE:
-        return VenueCreate().pack()
-    return TimezoneChoice(index=action.value).pack()
-
-
-def is_command(index: int) -> bool:
-    """True when a zone index is one of the edit commands rather than a zone of the page."""
-    return index < 0
-
 
 #: The blocks of TZ 5.8 that stage 0 builds, in the order the section lists them. Captions
 #: are references into `src/bot/texts/`; this holds no wording of its own.
@@ -164,24 +124,28 @@ def wizard_timezones(zones: Sequence[str]) -> InlineKeyboardMarkup:
 
 
 def settings() -> InlineKeyboardMarkup:
-    """The settings screen: one edit button per line of TZ 5.8's settings block."""
+    """The settings screen: one edit button per line of TZ 5.8's settings block.
+
+    Each button names its field through :class:`~src.bot.callbacks.AdminAction`, so the
+    resolver checks the manager's role before any of the three handlers runs.
+    """
     rows = [
         [
             InlineKeyboardButton(
                 text=texts.SETTINGS_TIMEZONE_BUTTON,
-                callback_data=command(VenueCommand.EDIT_TIMEZONE),
+                callback_data=AdminCommand(action=AdminAction.VENUE_TIMEZONE).pack(),
             )
         ],
         [
             InlineKeyboardButton(
                 text=texts.SETTINGS_CHECKLIST_LEAD_BUTTON,
-                callback_data=command(VenueCommand.EDIT_LEAD_MINUTES),
+                callback_data=AdminCommand(action=AdminAction.VENUE_LEAD).pack(),
             )
         ],
         [
             InlineKeyboardButton(
                 text=texts.SETTINGS_SHIFT_WINDOW_BUTTON,
-                callback_data=command(VenueCommand.EDIT_WINDOW),
+                callback_data=AdminCommand(action=AdminAction.VENUE_WINDOW).pack(),
             )
         ],
     ]
@@ -204,13 +168,17 @@ def offer() -> InlineKeyboardMarkup:
     No navigation row at all, and that is the point: whoever sees this screen has no
     membership anywhere (decision A3), so home would lead to a menu they cannot be shown
     and back to a screen that does not exist.
+
+    :class:`~src.bot.callbacks.VenueCreate` is the same payload
+    `src/bot/keyboards/onboarding.py` draws, so the two entrances into the wizard are one
+    button with one handler rather than two spellings of it.
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=texts.ONBOARDING_CREATE_VENUE_BUTTON,
-                    callback_data=command(VenueCommand.CREATE),
+                    callback_data=VenueCreate().pack(),
                 )
             ]
         ]
@@ -220,12 +188,9 @@ def offer() -> InlineKeyboardMarkup:
 __all__ = [
     "BLOCKS",
     "TIMEZONE_COLUMNS",
-    "VenueCommand",
     "back_to_board",
     "block",
     "board",
-    "command",
-    "is_command",
     "offer",
     "settings",
     "settings_step",

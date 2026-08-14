@@ -18,16 +18,14 @@ is not brevity: the order of the steps, which of them are optional and which key
 are then one thing to read and one thing to change, instead of eight places where the seventh
 is the one that drifts.
 
-**Three of the presses ride on `TimezoneChoice` and none of them is checked by the
-resolver.** The scheme declares no factory for "start the form", "skip" or "this category" —
-see the module docstring of `src/bot/keyboards/recipe_form.py` for the slice of the index
-space they take and why declaring the right factories is not this task's to do. What matters
-here is the consequence: `TimezoneChoice` is `needs_actor=False` in the resolver, so those
-payloads arrive **unauthenticated**, exactly as the three settings buttons of
-`src/bot/handlers/admin_venue.py` do. Every handler below therefore calls
-:func:`~src.bot.handlers.admin.manager_of` for itself, including the ones that only draw a
-screen, and a message step does the same because no resolver runs on a message at all
-(TZ 9, TZ 2). Only `OpenAdmin(CATALOGUE)` is vetted before it gets here.
+**Every press of this block is vetted before it arrives; every typed step is not.**
+`AdminCommand` (open the form, skip a step), `RecipeCategory` (a category of the page) and
+`OpenAdmin` all carry `minimum_role=MANAGER` in `src/bot/middlewares/resolver.py`, so a
+press that reaches a handler below has already been vetted. The handlers ask again anyway,
+and that is a second line rather than a leftover: the answer is one attribute read and the
+cost of it being missing is a manager's screen shown to a bartender. :func:`take_answer`
+asks because it *has* to — no resolver runs on a message at all — and :func:`_save` reads
+the actor it hands the service (TZ 9, TZ 2).
 
 **Nothing is written before the last step.** The draft lives in the FSM state until
 :func:`_save` calls `RecipeService.create` once, so a cancelled form leaves the database as
@@ -48,9 +46,14 @@ from aiogram.fsm.state import State
 from aiogram.types import CallbackQuery, Message
 
 from src.bot import texts
-from src.bot.callbacks import AdminSection, OpenAdmin, TimezoneChoice
+from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
+    AdminSection,
+    OpenAdmin,
+    RecipeCategory,
+)
 from src.bot.handlers.admin import BOT_KEY, Event, deliver, manager_of, refuse
-from src.bot.keyboards.recipe_form import CATEGORY_BASE, RecipeCommand, category_index
 from src.bot.middlewares.menu import STATE_KEY
 from src.bot.middlewares.resolver import PAYLOAD_KEY
 from src.bot.middlewares.services import SERVICES_KEY
@@ -182,12 +185,9 @@ async def open_catalogue(event: CallbackQuery, **data: Any) -> None:
 async def start_form(event: CallbackQuery, **data: Any) -> None:
     """`CARD_ADD_BUTTON`: the draft starts empty and nothing is written until the last step.
 
-    The rights are checked here because nothing else checks them — see the module docstring
-    on what riding `TimezoneChoice` costs.
+    No role check here: `AdminCommand` is `minimum_role=MANAGER` in the resolver, so a
+    bartender replaying this payload is refused before the form is opened (TZ 9).
     """
-    if manager_of(data) is None:
-        await refuse(event)
-        return
     state: FSMContext = data[STATE_KEY]
     await state.set_state(RecipeWizard.name)
     await state.set_data({})
@@ -200,6 +200,10 @@ async def take_answer(event: Message, **data: Any) -> None:
     A blank answer to a required step re-asks it and remembers nothing; a blank answer to an
     optional one is the skip written out by hand, which is the same fact and is stored as the
     same absence (`RecipeService` turns a blank field into `None` in any case).
+
+    The role is checked here and can be nowhere else: aiogram runs the resolver on callback
+    queries only, so a form left open by somebody who has since been demoted is stopped by
+    this line (TZ 9).
     """
     state: FSMContext = data[STATE_KEY]
     if manager_of(data) is None:
@@ -235,7 +239,7 @@ async def choose_category(event: CallbackQuery, **data: Any) -> None:
         return
     payload = data[PAYLOAD_KEY]
     offered = await _offered(state, services)
-    chosen = _category_at(offered, category_index(payload.index))
+    chosen = _category_at(offered, payload.index)
     if chosen is None:
         await _draw(event, data, FORM[1])
         return
@@ -412,16 +416,13 @@ def _remembered(collected: dict[str, Any], key: str) -> str:
 def router() -> Router:
     """The screens of this block (see the module docstring).
 
-    Order matters in one place. The two state-filtered `TimezoneChoice` handlers sit before
-    the catch-all, so a press in a step it belongs to never reaches the apology; the three
-    index bands cannot overlap each other (`src/bot/keyboards/recipe_form.py`) and none of
-    them can be a zone or a `VenueCommand`, which is what keeps this registration from
-    swallowing the venue block's — that block is included before this one and answers its own
-    indices first either way.
+    Order matters in one place: the two state-filtered handlers sit before the catch-alls,
+    so a press made inside the step it belongs to never reaches the apology meant for a
+    press made outside it.
 
-    `CARD_ADD_BUTTON` is registered without a state filter on purpose: it means "start a card"
-    from the section and equally from a form left half-filled, and the first thing it does is
-    reset the draft.
+    `CARD_ADD_BUTTON` is registered without a state filter on purpose: it means "start a
+    card" from the section and equally from a form left half-filled, and the first thing it
+    does is reset the draft.
     """
     instance = Router(name=ROUTER_NAME)
     instance.callback_query.register(
@@ -430,22 +431,25 @@ def router() -> Router:
     )
     instance.callback_query.register(
         start_form,
-        TimezoneChoice.filter(F.index == RecipeCommand.ADD.value),
+        AdminCommand.filter(F.action == AdminAction.RECIPE_NEW),
     )
     instance.callback_query.register(
         choose_category,
-        TimezoneChoice.filter(F.index <= CATEGORY_BASE),
+        RecipeCategory.filter(),
         StateFilter(RecipeWizard.category),
     )
     instance.callback_query.register(
         skip_step,
-        TimezoneChoice.filter(F.index == RecipeCommand.SKIP.value),
+        AdminCommand.filter(F.action == AdminAction.STEP_SKIP),
         StateFilter(*OPTIONAL_STATES),
     )
+    # The same two presses arriving outside the step they belong to: a button from a screen
+    # the scenario has already left. Two registrations because they are two factories.
     instance.callback_query.register(
         stale_step,
-        TimezoneChoice.filter((F.index == RecipeCommand.SKIP.value) | (F.index <= CATEGORY_BASE)),
+        AdminCommand.filter(F.action == AdminAction.STEP_SKIP),
     )
+    instance.callback_query.register(stale_step, RecipeCategory.filter())
     instance.message.register(take_answer, StateFilter(*(step.state for step in FORM)))
     return instance
 

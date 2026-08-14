@@ -13,24 +13,22 @@ the line written `2.` — the same contract `src/bot/keyboards/checklist.py` giv
 bartender, which is why the two constants and :func:`~src.bot.keyboards.checklist.fit` are
 imported from there rather than repeated.
 
-**Every press that is not a line and not a group rides in the negative half of
-`EditorGroup.group_index`** (:class:`EditorCommand`). This is the same stopgap
-:class:`~src.bot.keyboards.admin.VenueCommand` documents for the settings screen, and it is
-here for the same reason: the editor needs "add a line to group 3", "rename group 3",
-"reword line 41", "move line 41 up" and "open the whole checklist", `src/bot/callbacks.py`
-declares no factory for any of them, and a factory declared outside that file registers
-itself into the scheme without a rule in the resolver — which fails the build
-(`tests/bot/test_middlewares.py::test_every_callback_factory_has_a_rule`).
+**Every press that is not a line and not a group is an
+:class:`~src.bot.callbacks.EditorCommand`** — "add a line to group 3", "rename group 3",
+"reword line 41", "move line 41 up", "open the whole checklist". The factory says what it
+does (:class:`~src.bot.callbacks.EditorAction`) and what it does it to (`target`: a group
+index for a group action, a `checklist_items` id for a line action, `0` where the action
+names neither), and it carries `template_id` as its venue anchor, so the resolver fetches
+the template through *this* venue's repository and refuses another venue's before a handler
+runs (TZ 9). Nothing here decides which of the two `target` is: the action does, and the
+handler that filters on the action reads it accordingly.
 
-The encoding is arithmetic rather than a table of magic numbers, because three of those five
-presses carry a target and a table cannot: a group index is small, a line's id is a `BIGINT`.
-One number holds both — ``-1 - command - COMMAND_COUNT * target`` — and :func:`decoded`
-takes it apart again. It is total in both directions: every negative index decodes to a
-command and a target, so a stale or hand-made payload lands on a screen rather than on an
-exception, and a non-negative one is a group index and is never mistaken for a command. The
-day `callbacks.py` gains an `EditorAction(template_id, action, target)`, this class and
-:func:`decoded` go away and only the registrations in
-`src/bot/handlers/admin_checklists.py` change.
+:class:`~src.bot.callbacks.EditorGroup` is left meaning exactly what it is named: open the
+group with this **non-negative** `group_index`. It used to carry the commands too, packed
+into the negative half of that field by arithmetic this module owned; the encoding worked
+and even kept the venue check, and was still the wrong shape — a field named `group_index`
+that sometimes meant "command five applied to line 91" is a field every reader has to be
+warned about, and `EditorGroup` is drawn by more than one screen.
 
 **Back leads to the board of the management section, and it is spelled as `OpenSection`.**
 Not `Nav(BACK, section=MANAGEMENT)`, which `src/bot/keyboards/admin.py::block` draws:
@@ -43,14 +41,14 @@ state into the next section, where the manager's next line would be read as chec
 
 from __future__ import annotations
 
-import enum
 from collections.abc import Iterator, Sequence
-from typing import Final
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot import texts
 from src.bot.callbacks import (
+    EditorAction,
+    EditorCommand,
     EditorGroup,
     EditorLine,
     EditorLineCritical,
@@ -64,54 +62,9 @@ from src.bot.keyboards.menu import submenu, wizard
 from src.services.templates import TemplateGroupView, TemplateItemView, TemplateView
 
 
-class EditorCommand(enum.IntEnum):
-    """A press of this block that names no group of the checklist (see the module docstring).
-
-    The value is the command's slot in the encoding and nothing else; it never reaches a
-    screen and never reaches the database. Members may be appended, and reordering them
-    changes what a button drawn a minute ago means — the same append-only rule
-    :func:`~src.services.venues.wizard_timezones` carries, and for the same reason.
-    """
-
-    #: The whole checklist, with no group singled out — the way back from a line's card.
-    TEMPLATE = 0
-    #: `EDITOR_ADD_BUTTON`: one more line at the end of the group in `target`.
-    ADD = 1
-    #: `EDITOR_ADD_TO_NEW_GROUP_BUTTON`: a new group, created with its first line (D2).
-    NEW_GROUP = 2
-    #: `EDITOR_RENAME_GROUP_BUTTON` on the checklist: rename the group in `target`.
-    RENAME = 3
-    #: `EDITOR_RENAME_GROUP_BUTTON` on a card: reword the line in `target`.
-    REWORD = 4
-    #: `EDITOR_MOVE_BUTTON`: the line in `target` swaps with the one above it.
-    MOVE_UP = 5
-
-
-#: The stride of the encoding. Read off the enum so that appending a command cannot leave
-#: it behind — a stride shorter than the number of commands would make two of them one.
-COMMAND_COUNT: Final = len(EditorCommand)
-
-
-def encoded(action: EditorCommand, target: int = 0) -> int:
-    """The `group_index` a command travels in. Always negative, so never a group (D2)."""
-    return -1 - int(action) - COMMAND_COUNT * target
-
-
-def decoded(group_index: int) -> tuple[EditorCommand, int] | None:
-    """The command and its target, or `None` when this index is an ordinary group.
-
-    Total on purpose: every negative number decodes, so a payload from a screen drawn by an
-    older version of this file answers with a screen and not with a traceback (TZ 9).
-    """
-    if group_index >= 0:
-        return None
-    position = -group_index - 1
-    return EditorCommand(position % COMMAND_COUNT), position // COMMAND_COUNT
-
-
-def command(template_id: int, action: EditorCommand, target: int = 0) -> str:
-    """The payload of one command button of this block."""
-    return EditorGroup(template_id=template_id, group_index=encoded(action, target)).pack()
+def command(template_id: int, action: EditorAction, target: int = 0) -> str:
+    """The payload of one command button of this block (see the module docstring)."""
+    return EditorCommand(action=action, template_id=template_id, target=target).pack()
 
 
 # --------------------------------------------------------------------------------------
@@ -148,7 +101,7 @@ def group_button(template_id: int, number: int, group: TemplateGroupView) -> Inl
 def command_button(
     caption: str,
     template_id: int,
-    action: EditorCommand,
+    action: EditorAction,
     target: int = 0,
 ) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=caption, callback_data=command(template_id, action, target))
@@ -186,7 +139,7 @@ def back_to_checklist(template_id: int) -> InlineKeyboardButton:
     """The way back from a card or from a step: the checklist itself, not the board."""
     return InlineKeyboardButton(
         text=texts.BACK_BUTTON,
-        callback_data=command(template_id, EditorCommand.TEMPLATE),
+        callback_data=command(template_id, EditorAction.TEMPLATE),
     )
 
 
@@ -229,10 +182,10 @@ def template_keyboard(
         command_button(
             texts.EDITOR_ADD_BUTTON,
             template_id,
-            EditorCommand.ADD,
+            EditorAction.ADD,
             0 if current is None else current.index,
         ),
-        command_button(texts.EDITOR_ADD_TO_NEW_GROUP_BUTTON, template_id, EditorCommand.NEW_GROUP),
+        command_button(texts.EDITOR_ADD_TO_NEW_GROUP_BUTTON, template_id, EditorAction.NEW_GROUP),
     ]
     rows.append(additions)
     if current is not None:
@@ -241,7 +194,7 @@ def template_keyboard(
                 command_button(
                     texts.EDITOR_RENAME_GROUP_BUTTON,
                     template_id,
-                    EditorCommand.RENAME,
+                    EditorAction.RENAME_GROUP,
                     current.index,
                 )
             ]
@@ -270,7 +223,7 @@ def item_keyboard(
             command_button(
                 texts.EDITOR_RENAME_GROUP_BUTTON,
                 template_id,
-                EditorCommand.REWORD,
+                EditorAction.REWORD,
                 item.item_id,
             )
         ],
@@ -278,7 +231,7 @@ def item_keyboard(
     if movable:
         rows[-1].append(
             command_button(
-                texts.EDITOR_MOVE_BUTTON, template_id, EditorCommand.MOVE_UP, item.item_id
+                texts.EDITOR_MOVE_BUTTON, template_id, EditorAction.MOVE_UP, item.item_id
             )
         )
     rows.append([delete_button(item)])
@@ -316,16 +269,12 @@ def _chunks[T](items: Sequence[T], size: int) -> Iterator[list[T]]:
 
 
 __all__ = [
-    "COMMAND_COUNT",
-    "EditorCommand",
     "back_to_checklist",
     "back_to_management",
     "command",
     "command_button",
     "critical_button",
-    "decoded",
     "delete_button",
-    "encoded",
     "group_button",
     "item_keyboard",
     "line_button",

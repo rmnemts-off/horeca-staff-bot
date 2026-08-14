@@ -575,11 +575,109 @@ class TimezoneChoice(Callback, prefix="tz"):
     index: int
 
 
+class AdminAction(enum.StrEnum):
+    """A press of the management section that names no row of any table.
+
+    These share one factory because they share one rule: every action here is a manager's
+    (TZ 2), so the resolver checks the role once, and a screen added at stage 1 inherits
+    the check by declaring its action instead of by remembering to ask.
+
+    Two-letter codes because they travel in `callback_data`; nobody ever sees them.
+    """
+
+    #: Venue settings (plan task 30), one per editable field.
+    VENUE_TIMEZONE = "vt"
+    VENUE_LEAD = "vl"
+    VENUE_WINDOW = "vw"
+    #: Start the shift wizard (plan task 29).
+    SHIFT_NEW = "sn"
+    #: Start the recipe form (plan task 30a, decision B5).
+    RECIPE_NEW = "rn"
+    #: Leave an optional step of a wizard empty — TZ 5.5 draws a card without any of them.
+    STEP_SKIP = "sk"
+
+
+class AdminCommand(Callback, prefix="am"):
+    """One press of TZ 5.8 that carries an intent and no id.
+
+    **This factory exists because the alternative was tried and measured.** Three blocks of
+    the management section needed a payload for "start this wizard", "edit this setting",
+    "skip this step"; the scheme declared none, and each block took a slice of the negative
+    half of :class:`TimezoneChoice`'s index. That cost two things.
+
+    The resolver's rule for `TimezoneChoice` is `needs_actor=False` — the venue wizard runs
+    before any membership exists — so every one of those presses arrived **unchecked**, and
+    each handler had to verify the role by hand. That is precisely the arrangement
+    `src/bot/middlewares/resolver.py` was written to abolish: nine handler modules will be
+    written, and if each checks for itself, eight will get it right.
+
+    And the slices were a namespace agreed in comments between modules written in parallel,
+    where two blocks picking one number route one block's button into the other's handler —
+    the wrong-screen failure decision D14 exists to prevent.
+    """
+
+    action: AdminAction
+
+
+class RecipeCategory(Callback, prefix="rk"):
+    """A category from the page the recipe form is showing (decision B5).
+
+    An index into the page held in the FSM state, not the category itself: a category is a
+    word the venue typed, and rule 2 of this module's docstring keeps words out of buttons.
+    Same shape and same reason as :class:`TimezoneChoice`.
+    """
+
+    index: int
+
+
+class EditorAction(enum.StrEnum):
+    """What a press of the checklist editor does (TZ 5.8, plan task 28)."""
+
+    #: Back to the whole checklist, with no group singled out.
+    TEMPLATE = "t"
+    #: One more line at the end of the group in `target`.
+    ADD = "a"
+    #: A new group, created together with its first line (decision D2).
+    NEW_GROUP = "n"
+    #: Rename the group in `target`.
+    RENAME_GROUP = "g"
+    #: Reword the line in `target`.
+    REWORD = "w"
+    #: Swap the line in `target` with the one above it.
+    MOVE_UP = "u"
+    #: The whole checklist in one message (decision B6).
+    BULK = "b"
+
+
+class EditorCommand(Callback, prefix="ek"):
+    """A press of the template editor: what to do, and to what.
+
+    `template_id` is not decoration — it is the venue anchor, so the resolver fetches the
+    template through *this* venue's repository and refuses another venue's before any
+    handler runs (TZ 9). `target` is a group index or a `checklist_items` id depending on
+    `action`, and `0` where the action names neither; which of the two it is belongs to the
+    action and to the service, not to this scheme.
+
+    This replaces an arithmetic encoding that packed the same three facts into the negative
+    half of `EditorGroup.group_index`. That encoding was correct, and even kept the venue
+    check, and was still the wrong shape: a field named `group_index` that sometimes means
+    "command five applied to item 91" is a field every future reader has to be warned about,
+    and `EditorGroup` is drawn by more than one screen.
+    """
+
+    action: EditorAction
+    template_id: int
+    #: A group index, a `checklist_items` id, or `0`. See the class docstring.
+    target: int = 0
+
+
 __all__ = [
     "CALLBACK_BUDGET",
     "MAX_PREFIX_LENGTH",
     "REGISTRY",
     "SEPARATOR",
+    "AdminAction",
+    "AdminCommand",
     "AdminSection",
     "Callback",
     "CallbackBudgetError",
@@ -591,6 +689,8 @@ __all__ = [
     "ChecklistSkipAccept",
     "ChecklistToggle",
     "DuplicatePrefixError",
+    "EditorAction",
+    "EditorCommand",
     "EditorGroup",
     "EditorLine",
     "EditorLineCritical",
@@ -609,6 +709,7 @@ __all__ = [
     "NavTarget",
     "OpenAdmin",
     "OpenSection",
+    "RecipeCategory",
     "RecipeMissing",
     "RecipePage",
     "RecipeShow",

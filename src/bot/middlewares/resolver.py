@@ -45,6 +45,7 @@ from aiogram.types import CallbackQuery, TelegramObject
 
 from src.bot import texts
 from src.bot.callbacks import (
+    AdminCommand,
     Callback,
     CallbackError,
     ChecklistFinish,
@@ -52,6 +53,7 @@ from src.bot.callbacks import (
     ChecklistShow,
     ChecklistSkipAccept,
     ChecklistToggle,
+    EditorCommand,
     EditorGroup,
     EditorLine,
     EditorLineCritical,
@@ -67,6 +69,7 @@ from src.bot.callbacks import (
     Nav,
     OpenAdmin,
     OpenSection,
+    RecipeCategory,
     RecipeMissing,
     RecipePage,
     RecipeShow,
@@ -443,6 +446,26 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
     EditorGroup: Rule(
         minimum_role=MemberRole.MANAGER,
         subject=Subject(ChecklistTemplate, "template_id", load_template, OWN),
+    ),
+    # Everything the editor does that is not "open this group": the template is the venue
+    # anchor, so the row is fetched through this venue's repository like any other subject.
+    EditorCommand: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(ChecklistTemplate, "template_id", load_template, OWN),
+    ),
+    # -- management presses that name no row (TZ 5.8) -----------------------------------
+    AdminCommand: Rule(
+        minimum_role=MemberRole.MANAGER,
+        note=(
+            "starts a wizard or opens a settings field; there is no row until the wizard "
+            "finishes, and the venue is the actor's by construction. The role is the whole "
+            "check, and it is here rather than in each of the four handlers that draw these "
+            "buttons -- see the class docstring for what the previous arrangement cost"
+        ),
+    ),
+    RecipeCategory: Rule(
+        minimum_role=MemberRole.MANAGER,
+        note="an index into the page of categories held in the FSM state, not a row",
     ),
     # -- before there is a venue to scope anything to (TZ 5.1, decision A3) ------------
     InviteConfirm: Rule(

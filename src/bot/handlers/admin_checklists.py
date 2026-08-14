@@ -36,10 +36,26 @@ For the same reason the back button of this block is an `OpenSection`, not
 does not watch the second, and a `bulk` state carried out of this section would turn the
 manager's next line, typed on somebody else's screen, into checklist items.
 
-**Commands ride in `EditorGroup.group_index`** — see
-:class:`~src.bot.keyboards.editor.EditorCommand` for the whole of that stopgap and why
-declaring a factory here is not an option. This module only decodes what a press means; the
-encoding is the keyboard's.
+**Every press of this block is checked before it arrives, and by one thing.** All seven
+factories drawn here declare `minimum_role=MANAGER` in `src/bot/middlewares/resolver.py`,
+and each of them names a row the resolver fetches through *this* venue's repository: a
+`ChecklistTemplate` for :class:`~src.bot.callbacks.EditorGroup` and
+:class:`~src.bot.callbacks.EditorCommand`, a `ChecklistItem` for the four `EditorLine*`
+ones. So a `staff` press and a template id belonging to the bar next door are both refused
+above this module (TZ 9, acceptance 11.3), and no callback handler below repeats the check —
+`data["subject"]` is the checked row and is used instead of trusting the id in the payload.
+
+**The typed steps check the role themselves, and have to.** The resolver is registered on
+`Dispatcher.callback_query` and on nothing else, so a `Message` reaches
+:func:`take_item_text`, :func:`take_new_group`, :func:`take_group_name` and
+:func:`take_bulk` with no rule applied at all — and every one of them writes. Their
+`manager_of` is therefore not a leftover of the arrangement the resolver replaced: it is the
+only check on that path.
+
+**What a press means is the payload's `action`** (:class:`~src.bot.callbacks.EditorAction`),
+so the router filters on it and every command has a handler of its own. `target` is a group
+index for a group action and a `checklist_items` id for a line action; which of the two it
+is belongs to the action, and each handler below says so by what it does with it.
 """
 
 from __future__ import annotations
@@ -56,6 +72,8 @@ from aiogram.types import CallbackQuery, Message
 from src.bot import texts
 from src.bot.callbacks import (
     AdminSection,
+    EditorAction,
+    EditorCommand,
     EditorGroup,
     EditorLine,
     EditorLineCritical,
@@ -64,14 +82,14 @@ from src.bot.callbacks import (
     OpenAdmin,
 )
 from src.bot.handlers.admin import BOT_KEY, deliver, manager_of
-from src.bot.keyboards.editor import EditorCommand, decoded
+from src.bot.middlewares.auth import ACTOR_KEY
 from src.bot.middlewares.menu import STATE_KEY
-from src.bot.middlewares.resolver import PAYLOAD_KEY
+from src.bot.middlewares.resolver import PAYLOAD_KEY, SUBJECT_KEY
 from src.bot.middlewares.services import SERVICES_KEY
 from src.bot.states import TemplateEditor
 from src.bot.views import Screen
 from src.bot.views import editor as screens
-from src.db.models import ChecklistType
+from src.db.models import ChecklistTemplate, ChecklistType
 from src.services.access import AccessContext
 from src.services.templates import (
     BulkResult,
@@ -171,90 +189,117 @@ class EditorServices(Protocol):
 # --------------------------------------------------------------------------------------
 
 
-async def open_checklists(event: Event, **data: Any) -> None:
-    """`OpenAdmin(CHECKLISTS)`: the checklist of this venue, empty state included."""
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+async def open_checklists(event: CallbackQuery, **data: Any) -> None:
+    """`OpenAdmin(CHECKLISTS)`: the checklist of this venue, empty state included.
+
+    No role check here: `OpenAdmin` is a manager's payload by its rule in the resolver, and
+    a press that is not one never reaches this function (see the module docstring).
+    """
+    actor = _actor(data)
     await _show(event, data, await _templates(data).view(actor, EDITED_TYPE))
 
 
 async def open_group(event: CallbackQuery, **data: Any) -> None:
-    """A group of the switcher: the same screen with the markers moved onto it (D11)."""
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+    """A group of the switcher: the same screen with the markers moved onto it (D11).
+
+    `EditorGroup` means this and only this now, so `group_index` is a group index — the
+    venue's own column, with the holes decision D2 leaves in it — and nothing else.
+    """
+    actor = _actor(data)
     payload: EditorGroup = data[PAYLOAD_KEY]
     view = await _templates(data).view(actor, EDITED_TYPE)
     await _show(event, data, view, group_index=payload.group_index)
 
 
-async def run_command(event: CallbackQuery, **data: Any) -> None:
-    """Everything a press can mean that is neither a line nor a group.
+async def open_template(event: CallbackQuery, **data: Any) -> None:
+    """`TEMPLATE`: the whole checklist, no group singled out — the way back from a card."""
+    actor = _actor(data)
+    await _show(event, data, await _templates(data).view(actor, EDITED_TYPE))
 
-    One handler and a `match` rather than six registrations, because the six share one
-    field: `src/bot/keyboards/editor.py` packs the command *and* its target into a single
-    number, and a magic filter cannot take that apart (it can only compare it). Routing is
-    still routing — nothing below decides anything a service would.
-    """
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
-    payload: EditorGroup = data[PAYLOAD_KEY]
-    decoding = decoded(payload.group_index)
-    if decoding is None:
-        # Registered behind `F.group_index < 0`, so this cannot happen from the router; it
-        # keeps the function total for a direct call and for whatever stage 1 registers.
-        await open_group(event, **data)
-        return
 
-    action, target = decoding
-    service = _templates(data)
-    view = await service.view(actor, EDITED_TYPE)
+async def add_line(event: CallbackQuery, **data: Any) -> None:
+    """`ADD`: one more line at the end of the group in `target`."""
+    actor = _actor(data)
+    payload: EditorCommand = data[PAYLOAD_KEY]
+    view = await _templates(data).view(actor, EDITED_TYPE)
+    await _ask(
+        event,
+        data,
+        screens.text_prompt(view),
+        step=TemplateEditor.item_text,
+        remember={TEMPLATE_FIELD: _template_id(data), GROUP_FIELD: payload.target},
+    )
+
+
+async def add_to_new_group(event: CallbackQuery, **data: Any) -> None:
+    """`NEW_GROUP`: the name first, the line second — a group needs one (decision D2)."""
+    actor = _actor(data)
+    view = await _templates(data).view(actor, EDITED_TYPE)
+    await _ask(
+        event,
+        data,
+        screens.group_prompt(view),
+        step=TemplateEditor.group_name,
+        remember={TEMPLATE_FIELD: _template_id(data)},
+    )
+
+
+async def rename_group(event: CallbackQuery, **data: Any) -> None:
+    """`RENAME_GROUP`: the new name of the group in `target`, typed next."""
+    actor = _actor(data)
+    payload: EditorCommand = data[PAYLOAD_KEY]
+    view = await _templates(data).view(actor, EDITED_TYPE)
+    await _ask(
+        event,
+        data,
+        screens.group_prompt(view),
+        step=TemplateEditor.rename_group,
+        remember={TEMPLATE_FIELD: _template_id(data), GROUP_FIELD: payload.target},
+    )
+
+
+async def reword_line(event: CallbackQuery, **data: Any) -> None:
+    """`REWORD`: the line in `target` says something else from now on."""
+    actor = _actor(data)
+    payload: EditorCommand = data[PAYLOAD_KEY]
+    view = await _templates(data).view(actor, EDITED_TYPE)
+    await _ask(
+        event,
+        data,
+        screens.text_prompt(view),
+        step=TemplateEditor.item_text,
+        remember={TEMPLATE_FIELD: _template_id(data), ITEM_FIELD: payload.target},
+    )
+
+
+async def move_line_up(event: CallbackQuery, **data: Any) -> None:
+    """`MOVE_UP`: the line in `target` swaps with the one above it, inside its group."""
+    actor = _actor(data)
+    payload: EditorCommand = data[PAYLOAD_KEY]
     state: FSMContext = data[STATE_KEY]
+    result = await _edit(
+        event, state, _templates(data).move_item(actor, payload.target, MoveDirection.UP)
+    )
+    if result is not None:
+        await _show_line(event, data, result)
 
-    match action:
-        case EditorCommand.TEMPLATE:
-            await _show(event, data, view)
-        case EditorCommand.ADD:
-            await _ask(
-                event,
-                data,
-                screens.text_prompt(view),
-                step=TemplateEditor.item_text,
-                remember={TEMPLATE_FIELD: payload.template_id, GROUP_FIELD: target},
-            )
-        case EditorCommand.NEW_GROUP:
-            await _ask(
-                event,
-                data,
-                screens.group_prompt(view),
-                step=TemplateEditor.group_name,
-                remember={TEMPLATE_FIELD: payload.template_id},
-            )
-        case EditorCommand.RENAME:
-            await _ask(
-                event,
-                data,
-                screens.group_prompt(view),
-                step=TemplateEditor.rename_group,
-                remember={TEMPLATE_FIELD: payload.template_id, GROUP_FIELD: target},
-            )
-        case EditorCommand.REWORD:
-            await _ask(
-                event,
-                data,
-                screens.text_prompt(view),
-                step=TemplateEditor.item_text,
-                remember={TEMPLATE_FIELD: payload.template_id, ITEM_FIELD: target},
-            )
-        case EditorCommand.MOVE_UP:
-            result = await _edit(event, state, service.move_item(actor, target, MoveDirection.UP))
-            if result is not None:
-                await _show_line(event, data, result)
+
+async def open_bulk(event: CallbackQuery, **data: Any) -> None:
+    """`BULK`: the syntax of decision B6, and the state that reads the answer as a checklist.
+
+    No button draws this today — the whole checklist is typed straight onto the screen the
+    section opens on, which is why :func:`_show` leaves the FSM in `TemplateEditor.bulk`.
+    The action exists in the scheme, so it is answered rather than left to spin (TZ 9).
+    """
+    actor = _actor(data)
+    view = await _templates(data).view(actor, EDITED_TYPE)
+    await _ask(
+        event,
+        data,
+        screens.bulk_prompt(view),
+        step=TemplateEditor.bulk,
+        remember={},
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -263,11 +308,13 @@ async def run_command(event: CallbackQuery, **data: Any) -> None:
 
 
 async def show_line(event: CallbackQuery, **data: Any) -> None:
-    """`EditorLine`: the card of the line whose marker was pressed."""
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+    """`EditorLine`: the card of the line whose marker was pressed.
+
+    The line itself is `data["subject"]`, fetched through the template of this venue
+    (decision D9), so an id from another bar never gets this far. What the screen needs is
+    the *view* of the template, which is the service's and is read here.
+    """
+    actor = _actor(data)
     payload: EditorLine = data[PAYLOAD_KEY]
     view = await _templates(data).view(actor, EDITED_TYPE)
     item = screens.item_of(view, payload.item_id)
@@ -280,10 +327,7 @@ async def show_line(event: CallbackQuery, **data: Any) -> None:
 
 async def set_critical(event: CallbackQuery, **data: Any) -> None:
     """TZ 5.4: a critical line escalates to the manager the moment it is skipped."""
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+    actor = _actor(data)
     payload: EditorLineCritical = data[PAYLOAD_KEY]
     state: FSMContext = data[STATE_KEY]
     result = await _edit(
@@ -295,10 +339,7 @@ async def set_critical(event: CallbackQuery, **data: Any) -> None:
 
 async def set_photo(event: CallbackQuery, **data: Any) -> None:
     """TZ 5.4: a line with `requires_photo` is not ticked until the photo arrives."""
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+    actor = _actor(data)
     payload: EditorLinePhoto = data[PAYLOAD_KEY]
     state: FSMContext = data[STATE_KEY]
     result = await _edit(
@@ -315,10 +356,7 @@ async def delete_line(event: CallbackQuery, **data: Any) -> None:
     when it was the last line of that group, fall back to the end of the checklist, which is
     what makes the group's disappearance visible instead of leaving an empty heading.
     """
-    actor = manager_of(data)
-    if actor is None:
-        await _refuse(event)
-        return
+    actor = _actor(data)
     payload: EditorLineDelete = data[PAYLOAD_KEY]
     service = _templates(data)
     state: FSMContext = data[STATE_KEY]
@@ -345,6 +383,9 @@ async def take_item_text(event: Message, **data: Any) -> None:
     A blank message asks again instead of being saved: the service refuses it anyway
     (`BlankTextError`), and asking again is the answer TZ 8.2 wants — an error message for
     somebody who pressed send too early is a message about nothing.
+
+    The role is checked here because nothing above checks it: the resolver runs on callback
+    queries only, and this is a `Message` (see the module docstring).
     """
     actor = manager_of(data)
     if actor is None:
@@ -382,7 +423,10 @@ async def take_item_text(event: Message, **data: Any) -> None:
 
 
 async def take_new_group(event: Message, **data: Any) -> None:
-    """The name of a new group. Nothing is written yet — a group needs a line (D2)."""
+    """The name of a new group. Nothing is written yet — a group needs a line (D2).
+
+    The role is checked here: no resolver runs on a `Message` (see the module docstring).
+    """
     actor = manager_of(data)
     if actor is None:
         await _refuse(event)
@@ -399,7 +443,11 @@ async def take_new_group(event: Message, **data: Any) -> None:
 
 
 async def take_group_name(event: Message, **data: Any) -> None:
-    """The new name of a group: an update of every line in it (decision D2)."""
+    """The new name of a group: an update of every line in it (decision D2).
+
+    The role is checked here: no resolver runs on a `Message` (see the module docstring),
+    and the ids this step renames by were put in the FSM by the press that opened it.
+    """
     actor = manager_of(data)
     if actor is None:
         await _refuse(event)
@@ -443,6 +491,9 @@ async def take_bulk(event: Message, **data: Any) -> None:
     a pasted checklist costs a single fork and not forty. A message the parser makes nothing
     of writes nothing at all — no line, no template, no version — and the prompt is shown
     again with the syntax on it.
+
+    The role is checked here, and this is the step where it matters most: forty lines of a
+    venue's checklist arrive as a `Message`, which no resolver sees (module docstring).
     """
     actor = manager_of(data)
     if actor is None:
@@ -478,6 +529,30 @@ async def take_bulk(event: Message, **data: Any) -> None:
 def _templates(data: dict[str, Any]) -> Templates:
     services: EditorServices = data[SERVICES_KEY]
     return services.templates
+
+
+def _actor(data: dict[str, Any]) -> AccessContext:
+    """The manager behind a **callback** press, which the resolver has already vetted.
+
+    Not `manager_of`: by the time a handler of a checked factory runs, the resolver has
+    refused everything without an `AccessContext` (`Refusal.NO_CONTEXT`) and everything
+    below `MANAGER` (`Refusal.FORBIDDEN`), so there is no second answer to give and asking
+    again would only be a second copy of the rule. The typed steps of this module do use
+    `manager_of`, because no resolver runs on a `Message`.
+    """
+    actor: AccessContext = data[ACTOR_KEY]
+    return actor
+
+
+def _template_id(data: dict[str, Any]) -> int:
+    """The template a step will write into — read off the row, not off the payload.
+
+    `data["subject"]` is the `ChecklistTemplate` the resolver fetched through this venue's
+    repository, so this is the id of a template that exists and is this venue's; the number
+    in the button is only what asked for it.
+    """
+    template: ChecklistTemplate = data[SUBJECT_KEY]
+    return int(template.id)
 
 
 def _target_group_name(view: TemplateView, group_index: object) -> str | None:
@@ -613,10 +688,12 @@ async def _stale(event: Event) -> None:
 def router() -> Router:
     """The screens of this block (see the module docstring).
 
-    The two `EditorGroup` registrations cannot overlap: a group index is what the venue's own
-    `group_index` column holds and is never negative (decision D2), and every command is
-    encoded into the negative half (`src/bot/keyboards/editor.py`). The order is here so that
-    reading the file is reading the routing.
+    One registration per :class:`~src.bot.callbacks.EditorAction`, so what a press does is
+    decided by the filter and not by a `match` inside a handler — and a member added to the
+    enum without a handler here is a press nothing answers, which
+    `tests/bot/test_admin_checklists.py` asserts against the enum itself rather than against
+    a list repeated in the test. `EditorGroup` needs no filter beyond its own factory now:
+    it means "open this group" and nothing else.
 
     The message steps are filtered by state, so nothing typed outside a step is read as an
     answer — and a main-menu press never reaches them at all, because
@@ -626,8 +703,24 @@ def router() -> Router:
     instance.callback_query.register(
         open_checklists, OpenAdmin.filter(F.section == AdminSection.CHECKLISTS)
     )
-    instance.callback_query.register(open_group, EditorGroup.filter(F.group_index >= 0))
-    instance.callback_query.register(run_command, EditorGroup.filter(F.group_index < 0))
+    instance.callback_query.register(open_group, EditorGroup.filter())
+    instance.callback_query.register(
+        open_template, EditorCommand.filter(F.action == EditorAction.TEMPLATE)
+    )
+    instance.callback_query.register(add_line, EditorCommand.filter(F.action == EditorAction.ADD))
+    instance.callback_query.register(
+        add_to_new_group, EditorCommand.filter(F.action == EditorAction.NEW_GROUP)
+    )
+    instance.callback_query.register(
+        rename_group, EditorCommand.filter(F.action == EditorAction.RENAME_GROUP)
+    )
+    instance.callback_query.register(
+        reword_line, EditorCommand.filter(F.action == EditorAction.REWORD)
+    )
+    instance.callback_query.register(
+        move_line_up, EditorCommand.filter(F.action == EditorAction.MOVE_UP)
+    )
+    instance.callback_query.register(open_bulk, EditorCommand.filter(F.action == EditorAction.BULK))
     instance.callback_query.register(show_line, EditorLine.filter())
     instance.callback_query.register(set_critical, EditorLineCritical.filter())
     instance.callback_query.register(set_photo, EditorLinePhoto.filter())
@@ -649,11 +742,17 @@ __all__ = [
     "TEMPLATE_FIELD",
     "EditorServices",
     "Templates",
+    "add_line",
+    "add_to_new_group",
     "delete_line",
+    "move_line_up",
+    "open_bulk",
     "open_checklists",
     "open_group",
+    "open_template",
+    "rename_group",
+    "reword_line",
     "router",
-    "run_command",
     "set_critical",
     "set_photo",
     "show_line",

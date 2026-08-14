@@ -40,6 +40,8 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import InlineKeyboardMarkup
 from src.bot import texts
 from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
     AdminSection,
     OpenAdmin,
     ShiftCloser,
@@ -47,7 +49,6 @@ from src.bot.callbacks import (
     ShiftMember,
     ShiftOpener,
     ShiftShow,
-    TimezoneChoice,
     parse,
 )
 from src.bot.handlers.admin_schedule import (
@@ -68,7 +69,6 @@ from src.bot.handlers.admin_schedule import (
     take_window,
     use_default_window,
 )
-from src.bot.keyboards.schedule import ScheduleCommand
 from src.bot.middlewares.resolver import RULES, Refusal, resolve
 from src.bot.middlewares.services import VenueServices
 from src.bot.states import ShiftWizard
@@ -458,7 +458,7 @@ async def test_pressing_add_without_employees_does_not_start_a_scenario() -> Non
     state = make_state()
     services, _, _ = schedule_services()
     await start_wizard(
-        make_callback(TimezoneChoice(index=ScheduleCommand.ADD_SHIFT.value).pack(), bot=bot),
+        make_callback(AdminCommand(action=AdminAction.SHIFT_NEW).pack(), bot=bot),
         bot=bot,
         state=state,
         actor=MANAGER,
@@ -536,7 +536,7 @@ async def test_the_wizard_saves_one_shift_and_calls_the_service_once() -> None:
     settings = FakeSettings()
 
     await start_wizard(
-        make_callback(TimezoneChoice(index=ScheduleCommand.ADD_SHIFT.value).pack(), bot=bot),
+        make_callback(AdminCommand(action=AdminAction.SHIFT_NEW).pack(), bot=bot),
         bot=bot,
         state=state,
         actor=MANAGER,
@@ -870,26 +870,23 @@ async def test_a_wizard_button_pressed_in_a_step_it_does_not_belong_to_is_answer
     assert edits_of(bot) == []
 
 
-async def test_staff_cannot_start_the_wizard_even_though_the_resolver_lets_the_press() -> None:
-    """The one press of this block the resolver cannot scope, checked in the handler.
+async def test_staff_cannot_start_the_wizard() -> None:
+    """TZ 9: the role is checked on the server, not by leaving the button undrawn.
 
-    «Добавить смену» rides on `TimezoneChoice`, whose rule is `needs_actor=False` because
-    the create-venue wizard uses the same factory before any membership exists. So the role
-    is checked here, on the server, and not by leaving the button undrawn (TZ 9, CLAUDE.md).
+    Asserted against the resolver and not against the handler, because that is where the
+    check now is: `AdminCommand` carries `minimum_role=MANAGER`, so a press by a bartender
+    never reaches `start_wizard` at all. Checked in each block that draws one of these
+    buttons rather than once centrally — a rule proved on one caller is a rule the second
+    caller is assumed to inherit.
     """
-    bot = make_bot()
-    services, _, members = schedule_services(entries=[make_entry(7)])
-    state = make_state()
-    await start_wizard(
-        make_callback(TimezoneChoice(index=ScheduleCommand.ADD_SHIFT.value).pack(), bot=bot),
-        bot=bot,
-        state=state,
+    resolution = await resolve(
+        AdminCommand(action=AdminAction.SHIFT_NEW).pack(),
         actor=STAFF,
-        services=services,
+        repositories=None,
     )
-    assert alerts_of(bot) == [texts.ERROR_NOT_ALLOWED]
-    assert members.calls == [], "nothing about this venue is read for somebody refused"
-    assert await state.get_state() is None
+
+    assert not resolution.is_allowed
+    assert resolution.text == texts.ERROR_NOT_ALLOWED
 
 
 @pytest.mark.parametrize(

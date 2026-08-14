@@ -13,10 +13,10 @@ still fail:
   promises is `tests/services/test_venues.py`'s business, and what this file checks is that
   the handler calls it **once, with what the person typed, and never before the last step**;
 * **the settings**, the same way, plus the rule that a press with no rights writes nothing
-  (TZ 9). The three edit buttons ride on `TimezoneChoice` today (see
-  `src/bot/keyboards/admin.VenueCommand`), which is a factory the resolver lets through
-  without an actor — so the check the handler makes for itself is exactly the check that
-  cannot be dropped.
+  (TZ 9). The three edit buttons are `AdminCommand`, whose rule carries
+  `minimum_role=MANAGER`, so a bartender is refused by the resolver before any handler of
+  this block runs — which is what `test_a_bartender_cannot_edit_the_settings_of_the_venue`
+  asserts through the real resolver rather than through the handler alone.
 
 Criterion 11.6 is the assertion in `test_the_wizard_raises_a_venue_from_nothing`: the venue
 comes up through the interface, and the two templates it comes up with hold zero items —
@@ -41,11 +41,14 @@ from aiogram.types import (
 )
 from src.bot import handlers, texts
 from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
     AdminSection,
     MenuAction,
     OpenAdmin,
     OpenSection,
     TimezoneChoice,
+    VenueCreate,
     parse,
 )
 from src.bot.keyboards import admin as keyboards
@@ -328,7 +331,7 @@ def zone_index(name: str) -> int:
 
 async def run_wizard_to_the_window(stand: Stand) -> None:
     """Everything up to the last step, which is the only one that writes."""
-    await stand.presses(keyboards.command(keyboards.VenueCommand.CREATE))
+    await stand.presses(VenueCreate().pack())
     await stand.types(VENUE_NAME)
     await stand.types(VENUE_CITY)
     await stand.presses(TimezoneChoice(index=zone_index(VENUE_TIMEZONE)).pack())
@@ -440,7 +443,7 @@ def test_the_empty_state_is_the_offer_to_create_a_venue() -> None:
     """TZ 8.1 for the whole product: nothing exists, and one button ends that."""
     screen = views.no_venue_yet()
     assert screen.text == texts.ONBOARDING_CREATE_VENUE_OFFER
-    assert payloads_of(screen) == [keyboards.command(keyboards.VenueCommand.CREATE)]
+    assert payloads_of(screen) == [VenueCreate().pack()]
     assert isinstance(screen.markup, InlineKeyboardMarkup)
     captions = [button.text for row in screen.markup.inline_keyboard for button in row]
     assert captions == [texts.ONBOARDING_CREATE_VENUE_BUTTON], (
@@ -488,7 +491,7 @@ async def test_the_finished_wizard_hands_over_the_owner_s_main_menu() -> None:
 
 async def test_the_zone_is_pressed_and_never_typed() -> None:
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.VenueCommand.CREATE))
+    await stand.presses(VenueCreate().pack())
     await stand.types(VENUE_NAME)
     await stand.types(VENUE_CITY)
 
@@ -499,7 +502,7 @@ async def test_the_zone_is_pressed_and_never_typed() -> None:
         for button in row
         if button.callback_data is not None
     ]
-    zones = [entry for entry in offered if isinstance(entry, TimezoneChoice) and entry.index >= 0]
+    zones = [entry for entry in offered if isinstance(entry, TimezoneChoice)]
     assert len(zones) == len(wizard_timezones())
 
 
@@ -523,7 +526,7 @@ async def test_a_window_the_wizard_cannot_read_asks_again(typed: str) -> None:
 async def test_a_zone_button_that_names_nothing_re_draws_the_step() -> None:
     """A retyped `callback_data` is an ordinary event, not a traceback (TZ 9)."""
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.VenueCommand.CREATE))
+    await stand.presses(VenueCreate().pack())
     await stand.types(VENUE_NAME)
     await stand.types(VENUE_CITY)
 
@@ -536,7 +539,7 @@ async def test_a_zone_button_that_names_nothing_re_draws_the_step() -> None:
 
 async def test_a_blank_answer_does_not_become_the_name_of_a_venue() -> None:
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.VenueCommand.CREATE))
+    await stand.presses(VenueCreate().pack())
     await stand.types("   ")
     assert await stand.state.get_state() == VenueWizard.name.state
     assert stand.screen().endswith(texts.VENUE_NAME_PROMPT)
@@ -554,7 +557,7 @@ async def test_the_wizard_restarts_when_its_answers_are_gone() -> None:
 async def test_nobody_but_the_bootstrap_owner_may_start_the_wizard() -> None:
     """Decision A3 is a one-off trigger, and TZ 9 checks it on the server."""
     stand = Stand(actor=MANAGER, identity=bootstrap_owner(may_create_venue=False))
-    await stand.presses(keyboards.command(keyboards.VenueCommand.CREATE))
+    await stand.presses(VenueCreate().pack())
     assert await stand.state.get_state() is None
     assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
 
@@ -584,7 +587,7 @@ async def test_the_lead_time_is_typed_and_saved() -> None:
     stand = Stand(actor=MANAGER)
     await open_settings(stand)
 
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_LEAD_MINUTES))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_LEAD).pack())
     assert await stand.state.get_state() == SettingsEdit.lead_minutes.state
     assert stand.screen().endswith(texts.SETTINGS_CHECKLIST_LEAD_PROMPT)
 
@@ -600,7 +603,7 @@ async def test_the_lead_time_is_typed_and_saved() -> None:
 )
 async def test_a_lead_time_that_is_not_a_number_asks_again(typed: str) -> None:
     stand = Stand(actor=MANAGER)
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_LEAD_MINUTES))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_LEAD).pack())
     await stand.types(typed)
     assert stand.service.updates == []
     assert await stand.state.get_state() == SettingsEdit.lead_minutes.state
@@ -609,7 +612,7 @@ async def test_a_lead_time_that_is_not_a_number_asks_again(typed: str) -> None:
 
 async def test_the_default_window_moves_as_a_pair() -> None:
     stand = Stand(actor=MANAGER)
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_WINDOW))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_WINDOW).pack())
     assert await stand.state.get_state() == SettingsEdit.window.state
 
     await stand.types("09:00 - 22:30")
@@ -622,7 +625,7 @@ async def test_the_default_window_moves_as_a_pair() -> None:
 
 async def test_an_unreadable_window_leaves_the_settings_alone() -> None:
     stand = Stand(actor=MANAGER)
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_WINDOW))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_WINDOW).pack())
     await stand.types("когда как")
     assert stand.service.updates == []
     assert await stand.state.get_state() == SettingsEdit.window.state
@@ -631,7 +634,7 @@ async def test_an_unreadable_window_leaves_the_settings_alone() -> None:
 async def test_the_timezone_is_picked_from_the_same_list_the_wizard_offers() -> None:
     stand = Stand(actor=MANAGER)
     await open_settings(stand)
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_TIMEZONE))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_TIMEZONE).pack())
     assert stand.screen().endswith(texts.VENUE_TIMEZONE_PROMPT)
 
     chosen = wizard_timezones()[3]
@@ -650,21 +653,17 @@ async def test_a_zone_index_that_names_nothing_changes_no_setting() -> None:
 
 
 @pytest.mark.parametrize(
-    "command",
-    [
-        keyboards.VenueCommand.EDIT_TIMEZONE,
-        keyboards.VenueCommand.EDIT_LEAD_MINUTES,
-        keyboards.VenueCommand.EDIT_WINDOW,
-    ],
+    "action",
+    [AdminAction.VENUE_TIMEZONE, AdminAction.VENUE_LEAD, AdminAction.VENUE_WINDOW],
     ids=lambda value: str(value.name).lower(),
 )
 async def test_a_bartender_cannot_edit_the_settings_of_the_venue(
-    command: keyboards.VenueCommand,
+    action: AdminAction,
 ) -> None:
-    """TZ 9. These three payloads ride on a factory the resolver waves through with no
-    actor (`TimezoneChoice`), so this handler's own check is the only one there is."""
+    """TZ 9. `AdminCommand` carries `minimum_role=MANAGER`, so the resolver refuses this
+    before the handler runs; the handler asks again as a second line."""
     stand = Stand(actor=STAFF)
-    await stand.presses(keyboards.command(command))
+    await stand.presses(AdminCommand(action=action).pack())
     assert stand.service.updates == []
     assert await stand.state.get_state() is None
     assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
@@ -672,7 +671,7 @@ async def test_a_bartender_cannot_edit_the_settings_of_the_venue(
 
 async def test_a_press_with_no_membership_at_all_is_refused() -> None:
     stand = Stand(actor=None, identity=bootstrap_owner(may_create_venue=False))
-    await stand.presses(keyboards.command(keyboards.VenueCommand.EDIT_LEAD_MINUTES))
+    await stand.presses(AdminCommand(action=AdminAction.VENUE_LEAD).pack())
     assert stand.service.updates == []
     assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
 

@@ -36,7 +36,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import InlineKeyboardMarkup, Update
 from src.bot import handlers, texts
-from src.bot.callbacks import AdminSection, OpenAdmin, RecipeShow, TimezoneChoice, parse
+from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
+    AdminSection,
+    OpenAdmin,
+    RecipeCategory,
+    RecipeShow,
+    parse,
+)
 from src.bot.handlers.admin_recipes import (
     FORM,
     OPTIONAL_STATES,
@@ -44,7 +52,6 @@ from src.bot.handlers.admin_recipes import (
     CatalogueServices,
 )
 from src.bot.keyboards import recipe_form as keyboards
-from src.bot.keyboards.admin import VenueCommand
 from src.bot.middlewares.auth import ACTOR_KEY
 from src.bot.middlewares.resolver import RULES, CallbackResolverMiddleware, Refusal, resolve
 from src.bot.middlewares.services import SERVICES_KEY, VenueServices
@@ -286,7 +293,7 @@ def payloads_of(markup: InlineKeyboardMarkup | None) -> list[str]:
 
 async def walk_to_composition(stand: Stand, *, category: str = GROUP) -> None:
     """«Добавить» → название → категория (typed) → три пропуска, up to the composition."""
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
     await stand.types(category)
     for _ in range(3):
@@ -343,33 +350,20 @@ async def test_the_add_button_of_the_empty_section_actually_opens_the_form() -> 
 
 
 # --------------------------------------------------------------------------------------
-# The index space this block borrows (see `src/bot/keyboards/recipe_form.py`)
+# The payloads this block draws
 # --------------------------------------------------------------------------------------
 
 
-def test_the_recipe_indices_cannot_be_mistaken_for_a_zone_or_a_venue_command() -> None:
-    """The stopgap holds only while the three slices are disjoint.
-
-    A collision would not fail loudly: the venue block is included first, so its handler
-    would answer a press of this one and the manager would land on a settings screen.
-    """
-    taken = {command.value for command in VenueCommand}
-    borrowed = [command.value for command in keyboards.RecipeCommand]
-    borrowed += [keyboards.CATEGORY_BASE - offered for offered in range(keyboards.CATEGORY_LIMIT)]
-    for index in borrowed:
-        assert index < 0, "a non-negative index is a zone of the venue wizard"
-        assert index not in taken, f"{index} is already a VenueCommand"
-        assert index > keyboards.CATEGORY_BASE or keyboards.category_index(index) is not None
-
-
 def test_a_category_button_carries_its_place_in_the_page_and_nothing_else() -> None:
-    """Decision D14: a category is a string, so what travels is an index into the page."""
+    """Decision D14: a category is a word the venue typed, so what travels is an index.
+
+    The page it indexes into lives in the FSM state; a category in the button would be
+    free text, which rule 2 of `src/bot/callbacks.py` refuses outright.
+    """
     for offered in range(keyboards.CATEGORY_LIMIT):
-        payload = parse(keyboards.category_command(offered))
-        assert isinstance(payload, TimezoneChoice)
-        assert keyboards.category_index(payload.index) == offered
-    assert keyboards.category_index(keyboards.RecipeCommand.SKIP.value) is None
-    assert keyboards.category_index(0) is None
+        payload = parse(RecipeCategory(index=offered).pack())
+        assert isinstance(payload, RecipeCategory)
+        assert payload.index == offered
 
 
 # --------------------------------------------------------------------------------------
@@ -419,7 +413,7 @@ async def test_the_composition_reaches_the_card_through_the_service_parser() -> 
 async def test_the_categories_of_the_venue_are_offered_as_buttons() -> None:
     """TZ 5.5 and principle 1.4#5: what exists is pressed, and nothing is hard-coded."""
     stand = Stand(recipes=FakeRecipes(GROUP, OTHER_GROUP))
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
     assert await stand.state.get_state() == RecipeWizard.category.state
     assert GROUP in stand.captions()
@@ -432,7 +426,7 @@ async def test_the_categories_of_the_venue_are_offered_as_buttons() -> None:
 
 async def test_a_category_the_venue_does_not_have_yet_is_typed_over_the_buttons() -> None:
     stand = Stand(recipes=FakeRecipes(GROUP))
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
     await stand.types(OTHER_GROUP)
     assert (await stand.state.get_data())["category"] == OTHER_GROUP
@@ -442,9 +436,9 @@ async def test_a_category_the_venue_does_not_have_yet_is_typed_over_the_buttons(
 async def test_an_index_that_names_no_offered_category_redraws_the_step() -> None:
     """A stale keyboard must not save a category nobody chose (TZ 9)."""
     stand = Stand(recipes=FakeRecipes(GROUP))
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
-    await stand.presses(keyboards.category_command(keyboards.CATEGORY_LIMIT + 5))
+    await stand.presses(RecipeCategory(index=keyboards.CATEGORY_LIMIT + 5).pack())
     assert await stand.state.get_state() == RecipeWizard.category.state
     assert texts.CARD_GROUP_PROMPT in stand.screen()
     assert "category" not in await stand.state.get_data()
@@ -454,7 +448,7 @@ async def test_a_blank_name_is_asked_for_again_and_nothing_is_remembered() -> No
     """`RecipeService.create` refuses a card with no name, so the form does not carry one
     eight steps forward to be refused there (decision B5)."""
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types("   ")
     assert await stand.state.get_state() == RecipeWizard.name.state
     assert texts.CARD_NAME_PROMPT in stand.screen()
@@ -463,7 +457,7 @@ async def test_a_blank_name_is_asked_for_again_and_nothing_is_remembered() -> No
 
 async def test_an_optional_step_may_be_typed_as_well_as_skipped() -> None:
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
     await stand.types(GROUP)
     await stand.types("highball")
@@ -536,7 +530,7 @@ async def test_staff_cannot_open_the_form() -> None:
     """`TimezoneChoice` is `needs_actor=False`, so the resolver lets `CARD_ADD_BUTTON`
     through and this handler is the only check there is (TZ 9)."""
     stand = Stand(actor=STAFF)
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     assert await stand.state.get_state() is None, "no form was started"
     assert stand.recipes.drafts == []
     assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
@@ -545,17 +539,26 @@ async def test_staff_cannot_open_the_form() -> None:
 @pytest.mark.parametrize(
     ("step", "payload"),
     [
-        (RecipeWizard.category, keyboards.category_command(0)),
-        (RecipeWizard.composition, keyboards.command(keyboards.RecipeCommand.SKIP)),
+        (RecipeWizard.category, RecipeCategory(index=0).pack()),
+        (RecipeWizard.composition, AdminCommand(action=AdminAction.STEP_SKIP).pack()),
     ],
     ids=["category", "skip"],
 )
-async def test_staff_inside_the_form_is_refused_by_the_handler(step: State, payload: str) -> None:
+async def test_staff_inside_the_form_is_refused_before_the_handler(
+    step: State, payload: str
+) -> None:
     """The other half: a form left open by somebody who is no longer a manager.
 
-    The state is what tells these presses apart from a stale keyboard, so it is set here on
-    purpose — with no state they are answered as the old screens they are, which is the
-    neighbouring test.
+    The refusal comes from the resolver — `AdminCommand` and `RecipeCategory` both carry
+    `minimum_role=MANAGER` — so no handler of this module runs at all, which is the point:
+    the check is not something each of these screens has to remember.
+
+    The half-filled draft is left where it was, and that is deliberate rather than
+    overlooked. It leads nowhere: every further press is refused the same way, the next
+    typed line is refused by :func:`take_answer` (which does clear it, because no resolver
+    runs on a message), and the store forgets it within the day of `FSM_TTL`. Clearing it
+    from here would mean letting a refused press change state, which is the one thing a
+    refusal must not do.
     """
     stand = Stand(actor=STAFF, recipes=FakeRecipes(GROUP))
     await stand.state.set_state(step)
@@ -563,7 +566,6 @@ async def test_staff_inside_the_form_is_refused_by_the_handler(step: State, payl
     await stand.presses(payload)
     assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
     assert stand.recipes.drafts == []
-    assert await stand.state.get_state() is None, "a refused press leaves no live scenario"
 
 
 async def test_staff_typing_into_an_open_form_is_refused_too() -> None:
@@ -592,7 +594,7 @@ async def test_opening_the_section_ends_a_half_filled_form() -> None:
     """Arriving at the board is leaving the scenario; otherwise the next line typed would
     be read as somebody's garnish (TZ 8.2)."""
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
     await stand.types(DRINK)
     await stand.presses(OpenAdmin(section=AdminSection.CATALOGUE).pack())
     assert await stand.state.get_state() is None
@@ -602,15 +604,15 @@ async def test_opening_the_section_ends_a_half_filled_form() -> None:
 async def test_a_skip_pressed_outside_the_form_is_answered_and_saves_nothing() -> None:
     """TZ 9: an action answers in a second, even when the answer is «this screen is old»."""
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.SKIP))
+    await stand.presses(AdminCommand(action=AdminAction.STEP_SKIP).pack())
     assert stand.alerts() == [texts.ERROR_OUTDATED_SCREEN]
     assert stand.recipes.drafts == []
 
 
 async def test_a_category_press_outside_the_category_step_is_answered() -> None:
     stand = Stand()
-    await stand.presses(keyboards.command(keyboards.RecipeCommand.ADD))
-    await stand.presses(keyboards.category_command(0))
+    await stand.presses(AdminCommand(action=AdminAction.RECIPE_NEW).pack())
+    await stand.presses(RecipeCategory(index=0).pack())
     assert stand.alerts()[-1] == texts.ERROR_OUTDATED_SCREEN
     assert await stand.state.get_state() == RecipeWizard.name.state
 
@@ -689,5 +691,5 @@ def test_every_screen_survives_a_venue_that_types_html() -> None:
 def test_the_router_is_named_and_registers_the_screens() -> None:
     instance = handlers.admin_recipes.router()
     assert instance.name == "admin_recipes"
-    assert len(instance.callback_query.handlers) == 5
+    assert len(instance.callback_query.handlers) == 6
     assert len(instance.message.handlers) == 1

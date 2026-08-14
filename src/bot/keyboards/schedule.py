@@ -7,18 +7,12 @@ constructor rather than a habit of six screens (TZ 5.2, 8.2).
 
 Three decisions of this module are worth reading before editing.
 
-**`SCHEDULE_ADD_BUTTON` travels on :class:`~src.bot.callbacks.TimezoneChoice`, at a negative
-index.** The callback scheme declares no factory meaning "start the shift wizard", and every
-factory it does declare is either taken by another module or carries an id this button has
-none of: a shift that does not exist yet has no `shift_id`, and a wizard that has not asked
-who works yet has no `member_id`. Declaring a new factory means editing
-`src/bot/callbacks.py` **and** the resolver's `RULES` — two files other waves are writing in
-this hour, and a factory without a rule fails the build. So this press uses the same stopgap
-`src/bot/keyboards/admin.py` documents for its three settings buttons
-(:class:`~src.bot.keyboards.admin.VenueCommand`): a negative index can never name a zone
-(`timezone_at` answers `None` below zero), and the index chosen here is distinct from every
-one of theirs. The moment `callbacks.py` gains a `ShiftNew`, :class:`ScheduleCommand` and one
-registration in `src/bot/handlers/admin_schedule.py` go away. Reported with plan task 29.
+**`SCHEDULE_ADD_BUTTON` carries an intent and no id.** A shift that does not exist yet has
+no `shift_id`, and a wizard that has not asked who works yet has no `member_id`, so the
+press is :class:`~src.bot.callbacks.AdminCommand` with
+:attr:`~src.bot.callbacks.AdminAction.SHIFT_NEW` — the factory the management section uses
+for exactly that shape. Its rule in `src/bot/middlewares/resolver.py` is
+`minimum_role=MANAGER`, so the role is checked before the wizard's first step runs.
 
 **The default-window button carries the person, not the times.** A wall clock reading is
 text, and the scheme refuses text in a payload (rule 2 of `src/bot/callbacks.py`); the times
@@ -38,7 +32,6 @@ is the failure `keyboards/staff.py` documents at length, and this is the same fi
 from __future__ import annotations
 
 import datetime as dt
-import enum
 from collections.abc import Sequence
 from typing import Final
 
@@ -46,6 +39,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.bot import texts
 from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
     AdminSection,
     OpenAdmin,
     ShiftCloser,
@@ -53,7 +48,6 @@ from src.bot.callbacks import (
     ShiftMember,
     ShiftOpener,
     ShiftShow,
-    TimezoneChoice,
 )
 from src.bot.keyboards.admin import block
 from src.bot.keyboards.menu import submenu, wizard
@@ -64,18 +58,6 @@ from src.services.shifts import ShiftView
 #: Between the two facts a shift button carries. The same separator the roster lines of
 #: `src/bot/views/staff.py` use, so the two lists read as one product.
 BUTTON_SEPARATOR: Final = " · "
-
-
-class ScheduleCommand(enum.IntEnum):
-    """A press of this block that names no timezone (see the module docstring).
-
-    The value is deliberately far from `VenueCommand`'s -1..-4: several modules share this
-    one factory as a stopgap, they are being written in parallel, and two of them landing on
-    the same index would route one block's button into the other's handler. -29 is the number
-    of the plan task this block is, which is as close to a namespace as a stopgap gets.
-    """
-
-    ADD_SHIFT = -29
 
 
 # --------------------------------------------------------------------------------------
@@ -105,7 +87,7 @@ def add_button() -> InlineKeyboardButton:
     """`SCHEDULE_ADD_BUTTON` — the first step of the wizard (see the module docstring)."""
     return InlineKeyboardButton(
         text=texts.SCHEDULE_ADD_BUTTON,
-        callback_data=TimezoneChoice(index=ScheduleCommand.ADD_SHIFT.value).pack(),
+        callback_data=AdminCommand(action=AdminAction.SHIFT_NEW).pack(),
     )
 
 
@@ -236,7 +218,6 @@ def shift_keyboard(view: ShiftView) -> InlineKeyboardMarkup:
 
 __all__ = [
     "BUTTON_SEPARATOR",
-    "ScheduleCommand",
     "add_button",
     "back_to_schedule",
     "closer_button",

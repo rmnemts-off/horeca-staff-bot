@@ -31,11 +31,17 @@ written to `venue_settings` and `src/services/notifications.py` computes the mom
 module and to `src/bot/middlewares/menu.py`; a second answer to them in this file would be
 the same screen in two places (see `src/bot/handlers/__init__.py`).
 
-Two things in this module are stopgaps and are marked as such where they sit: the three
-settings-edit payloads that ride on :class:`~src.bot.callbacks.TimezoneChoice` because
-`src/bot/callbacks.py` declares no factory for them (see
-:class:`~src.bot.keyboards.admin.VenueCommand`), and :func:`window_in` / :func:`minutes_in`,
-which read what a manager typed. Both are reported with plan task 26.
+**Who checks the role, and where.** The three settings-edit presses carry
+:class:`~src.bot.callbacks.AdminCommand`, whose rule in `src/bot/middlewares/resolver.py`
+is `minimum_role=MANAGER`, so their handlers are reached already vetted and check nothing
+themselves. The two zone presses carry :class:`~src.bot.callbacks.TimezoneChoice`, whose
+rule is `needs_actor=False` — it has to be, because the wizard offers the same list before
+any membership exists — and the message steps have no resolver on them at all: aiogram runs
+it on callback queries only. Both of those check for themselves, and that is the whole of
+what is left to check by hand here.
+
+:func:`window_in` and :func:`minutes_in` read what a manager typed; they are reported with
+plan task 26.
 """
 
 from __future__ import annotations
@@ -49,9 +55,15 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from src.bot.callbacks import AdminSection, OpenAdmin, TimezoneChoice, VenueCreate
+from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
+    AdminSection,
+    OpenAdmin,
+    TimezoneChoice,
+    VenueCreate,
+)
 from src.bot.handlers.admin import BOT_KEY, deliver, manager_of, refuse
-from src.bot.keyboards.admin import VenueCommand
 from src.bot.keyboards.menu import main_menu
 from src.bot.middlewares.auth import IDENTITY_KEY
 from src.bot.middlewares.menu import STATE_KEY
@@ -254,10 +266,11 @@ async def open_settings(event: CallbackQuery, **data: Any) -> None:
 
 
 async def edit_timezone(event: CallbackQuery, **data: Any) -> None:
-    """The zone, from the same buttons the wizard offers (TZ 3.4)."""
-    if manager_of(data) is None:
-        await refuse(event)
-        return
+    """The zone, from the same buttons the wizard offers (TZ 3.4).
+
+    No role check here: the press carries `AdminCommand`, whose rule in the resolver is
+    `minimum_role=MANAGER`, so a bartender never reaches this line (TZ 9).
+    """
     await deliver(event, screens.settings_timezone(wizard_timezones()), bot=data[BOT_KEY])
 
 
@@ -268,6 +281,10 @@ async def take_settings_timezone(event: CallbackQuery, **data: Any) -> None:
     and holds none — so the index means what
     :func:`~src.services.venues.timezone_at` says it means. That is safe for exactly the
     reason `WizardTimezone` is documented as append-only.
+
+    The role is checked here because `TimezoneChoice` is `needs_actor=False` in the resolver
+    — the wizard draws the same buttons before any membership exists — so this press is the
+    one of the settings screen that arrives unvetted (TZ 9).
     """
     actor = manager_of(data)
     if actor is None:
@@ -284,17 +301,23 @@ async def take_settings_timezone(event: CallbackQuery, **data: Any) -> None:
 
 
 async def edit_lead_minutes(event: CallbackQuery, **data: Any) -> None:
-    """ "How long before the shift does the opening checklist arrive?" (TZ 5.4, TZ 6)."""
-    if manager_of(data) is None:
-        await refuse(event)
-        return
+    """ "How long before the shift does the opening checklist arrive?" (TZ 5.4, TZ 6).
+
+    The role was checked by the resolver, which is what `AdminCommand`'s rule is for; what
+    is left here is the step that asks for the number.
+    """
     state: FSMContext = data[STATE_KEY]
     await state.set_state(SettingsEdit.lead_minutes)
     await deliver(event, screens.settings_lead_minutes(), bot=data[BOT_KEY])
 
 
 async def take_lead_minutes(event: Message, **data: Any) -> None:
-    """The number that moves the push. The move is the notification service's (task 37)."""
+    """The number that moves the push. The move is the notification service's (task 37).
+
+    The role is checked here and cannot be anywhere else: no resolver runs on a message
+    (TZ 9), so a person who stopped being a manager while the step was open is stopped by
+    this line.
+    """
     actor = manager_of(data)
     state: FSMContext = data[STATE_KEY]
     if actor is None:
@@ -312,17 +335,21 @@ async def take_lead_minutes(event: Message, **data: Any) -> None:
 
 
 async def edit_window(event: CallbackQuery, **data: Any) -> None:
-    """The default shift window — what a shift with no time of its own inherits (TZ 4.2)."""
-    if manager_of(data) is None:
-        await refuse(event)
-        return
+    """The default shift window — what a shift with no time of its own inherits (TZ 4.2).
+
+    Vetted by the resolver through `AdminCommand`, like the two edit buttons above it.
+    """
     state: FSMContext = data[STATE_KEY]
     await state.set_state(SettingsEdit.window)
     await deliver(event, screens.settings_window(), bot=data[BOT_KEY])
 
 
 async def take_window_setting(event: Message, **data: Any) -> None:
-    """Both times move together: half a window is not a window."""
+    """Both times move together: half a window is not a window.
+
+    A message step, so the role is checked here for the reason
+    :func:`take_lead_minutes` gives.
+    """
     actor = manager_of(data)
     state: FSMContext = data[STATE_KEY]
     if actor is None:
@@ -378,40 +405,39 @@ async def _configuration(data: dict[str, Any], actor: AccessContext) -> VenueCon
 def router() -> Router:
     """The screens of this block (see the module docstring).
 
-    The three edit commands are registered before the two zone handlers, and both of those
-    before anything else that filters on the same factory: a command is a fixed negative
-    index and a zone is a non-negative one, so the two sets cannot overlap — the order is
-    here to keep the reading of the file the reading of the routing.
+    Order matters in one place: the wizard's zone handler is state-filtered and is
+    registered before the settings one, which takes every other `TimezoneChoice`. Each
+    factory means exactly one thing now — an `AdminCommand` is a command and a
+    `TimezoneChoice` is a zone — so nothing else here can overlap.
 
-    The wizard entry is the exception and needs no ordering at all: it has a factory of its
-    own. `VenueCreate` reaches this handler from both screens that offer it — the board of
-    this section, and the "there is no venue yet" screen `src/bot/handlers/onboarding.py`
-    shows the bootstrap owner of decision A3, who has no board to reach.
+    `VenueCreate` reaches this handler from both screens that offer it — the board of this
+    section, and the "there is no venue yet" screen `src/bot/handlers/onboarding.py` shows
+    the bootstrap owner of decision A3, who has no board to reach.
     """
     instance = Router(name=ROUTER_NAME)
 
     instance.callback_query.register(open_wizard, VenueCreate.filter())
     instance.callback_query.register(
         edit_timezone,
-        TimezoneChoice.filter(F.index == VenueCommand.EDIT_TIMEZONE.value),
+        AdminCommand.filter(F.action == AdminAction.VENUE_TIMEZONE),
     )
     instance.callback_query.register(
         edit_lead_minutes,
-        TimezoneChoice.filter(F.index == VenueCommand.EDIT_LEAD_MINUTES.value),
+        AdminCommand.filter(F.action == AdminAction.VENUE_LEAD),
     )
     instance.callback_query.register(
         edit_window,
-        TimezoneChoice.filter(F.index == VenueCommand.EDIT_WINDOW.value),
+        AdminCommand.filter(F.action == AdminAction.VENUE_WINDOW),
     )
     # A zone: inside the wizard it answers the step, anywhere else it is the settings screen.
     instance.callback_query.register(
         take_timezone,
-        TimezoneChoice.filter(F.index >= 0),
+        TimezoneChoice.filter(),
         StateFilter(VenueWizard.timezone),
     )
     instance.callback_query.register(
         take_settings_timezone,
-        TimezoneChoice.filter(F.index >= 0),
+        TimezoneChoice.filter(),
     )
     instance.callback_query.register(
         open_settings,

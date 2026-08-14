@@ -42,6 +42,8 @@ from aiogram.types import InlineKeyboardMarkup, Update
 from src.bot import texts
 from src.bot.callbacks import (
     AdminSection,
+    EditorAction,
+    EditorCommand,
     EditorGroup,
     EditorLine,
     EditorLineCritical,
@@ -52,7 +54,7 @@ from src.bot.callbacks import (
 )
 from src.bot.handlers import admin_checklists
 from src.bot.handlers.admin_checklists import EDITED_TYPE, EditorServices, Templates
-from src.bot.keyboards.editor import EditorCommand, command, decoded, encoded
+from src.bot.keyboards.editor import command
 from src.bot.middlewares.auth import ACTOR_KEY
 from src.bot.middlewares.resolver import RULES, CallbackResolverMiddleware, Refusal, resolve
 from src.bot.middlewares.services import SERVICES_KEY, VenueServices
@@ -399,7 +401,7 @@ async def test_an_edit_while_a_run_is_open_says_a_new_version_was_made() -> None
         runs=[(VENUE_ID, TEMPLATE_ID)],
     )
     await stand.opens()
-    await stand.presses(command(TEMPLATE_ID, EditorCommand.ADD, 0))
+    await stand.presses(command(TEMPLATE_ID, EditorAction.ADD, 0))
     await stand.types("check the glasses")
 
     assert texts.EDITOR_NEW_VERSION_TEMPLATE.format(version=2) in stand.screen()
@@ -422,7 +424,7 @@ async def test_an_edit_with_no_run_behind_it_says_nothing_about_versions() -> No
     and there is no version to announce."""
     stand = stand_with(make_item(1, TEMPLATE_ID, text="check the taps"))
     await stand.opens()
-    await stand.presses(command(TEMPLATE_ID, EditorCommand.ADD, 0))
+    await stand.presses(command(TEMPLATE_ID, EditorAction.ADD, 0))
     await stand.types("check the glasses")
 
     assert texts.EDITOR_NEW_VERSION_TEMPLATE.format(version=2) not in stand.screen()
@@ -544,7 +546,7 @@ async def test_requiring_a_photo_is_readable_on_the_card() -> None:
 async def test_rewording_a_line_replaces_it_instead_of_adding_one() -> None:
     stand = stand_with(make_item(1, TEMPLATE_ID, text="wipe the bar"))
     await stand.opens()
-    await stand.presses(command(TEMPLATE_ID, EditorCommand.REWORD, 1))
+    await stand.presses(command(TEMPLATE_ID, EditorAction.REWORD, 1))
     assert stand.screen() == texts.EDITOR_TEXT_PROMPT
 
     await stand.types("wipe the bar and the shelf")
@@ -585,6 +587,7 @@ async def test_the_order_button_lifts_a_line_and_is_not_drawn_on_the_first() -> 
         EditorLineCritical(item_id=1, is_set=True),
         EditorLinePhoto(item_id=1, is_set=True),
         EditorLineDelete(item_id=1),
+        EditorCommand(action=EditorAction.ADD, template_id=TEMPLATE_ID, target=0),
     ],
     ids=lambda payload: type(payload).__name__,
 )
@@ -600,6 +603,24 @@ async def test_staff_is_refused_every_payload_of_this_section(payload: Any) -> N
     assert resolution.payload is None
 
 
+async def test_staff_pressing_an_editor_button_never_reaches_a_handler() -> None:
+    """The same rule as above, pressed rather than resolved: `staff` taps «Добавить» on a
+    screen they kept from a promotion that has since been undone.
+
+    This is the half no handler of this module checks any more, so it is asserted end to end
+    through the dispatcher the resolver is registered on: the bartender is told no, no step
+    is opened, and the message they type next is therefore not a line of anybody's checklist.
+    """
+    stand = Stand(FakeTemplates(FakeItems(()), (make_template(TEMPLATE_ID),)), actor=STAFF)
+
+    await stand.presses(command(TEMPLATE_ID, EditorAction.ADD, 0))
+
+    assert stand.alerts() == [texts.ERROR_NOT_ALLOWED]
+    assert await stand.state.get_state() is None, "no step was opened by a refused press"
+    await stand.types("wipe the bar")
+    assert stand.lines() == []
+
+
 async def test_a_line_of_another_venue_is_not_reachable_by_id() -> None:
     """Acceptance 11.3: `checklist_items` has no venue of its own (decision D9), so a forged
     id is refused through the join to the template and not by a check in this module."""
@@ -611,6 +632,34 @@ async def test_a_line_of_another_venue_is_not_reachable_by_id() -> None:
         EditorLine(item_id=9).pack(), actor=MANAGER, repositories=Subjects(repos)
     )
     assert resolution.refusal is Refusal.MISSING
+
+
+async def test_a_command_naming_another_venues_template_is_refused() -> None:
+    """Acceptance 11.3, the check the encoding used to carry and the factory now carries.
+
+    `template_id` is the venue anchor of every command: the resolver fetches it through this
+    venue's repository, where the bar next door's template is not "rejected" but invisible.
+    Both halves are asserted — the resolution, and the press, which must open no step and
+    leave both venues' lines where they were.
+    """
+    theirs = 2
+    repos = FakeTemplates(
+        FakeItems((make_item(9, theirs, text="theirs"),)),
+        (make_template(TEMPLATE_ID), make_template(theirs, venue_id=OTHER_VENUE_ID)),
+    )
+    forged = command(theirs, EditorAction.ADD, 0)
+
+    resolution = await resolve(forged, actor=MANAGER, repositories=Subjects(repos))
+    assert resolution.refusal is Refusal.MISSING
+    assert resolution.payload is None
+
+    stand = Stand(repos)
+    await stand.opens()
+    await stand.presses(forged)
+    assert stand.alerts()[-1] == texts.ERROR_NOT_ALLOWED
+    assert await stand.state.get_state() == TemplateEditor.bulk.state, "no step was opened"
+    assert [item.text for item in stand.lines(theirs)] == ["theirs"]
+    assert stand.lines() == []
 
 
 async def test_a_press_on_a_line_that_is_already_gone_is_answered() -> None:
@@ -625,7 +674,7 @@ async def test_a_press_on_a_line_that_is_already_gone_is_answered() -> None:
 async def test_a_blank_line_is_asked_for_again_and_nothing_is_written() -> None:
     stand = stand_with()
     await stand.opens()
-    await stand.presses(command(TEMPLATE_ID, EditorCommand.ADD, 0))
+    await stand.presses(command(TEMPLATE_ID, EditorAction.ADD, 0))
     await stand.types("    ")
     assert stand.screen() == texts.EDITOR_TEXT_PROMPT
     assert stand.lines() == []
@@ -633,30 +682,50 @@ async def test_a_blank_line_is_asked_for_again_and_nothing_is_written() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# The command encoding (see `src/bot/keyboards/editor.py`)
+# The commands of the editor (`EditorCommand`, `src/bot/keyboards/editor.py`)
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("action", list(EditorCommand), ids=lambda action: action.name)
-@pytest.mark.parametrize("target", [0, 1, 7, 2**63 - 1], ids=str)
-def test_a_command_never_reads_as_a_group_and_decodes_back(
-    action: EditorCommand, target: int
-) -> None:
-    """The two halves share one field, so the split has to be total in both directions: a
-    command is always negative (a `group_index` never is, decision D2) and always comes back
-    as the command and the target it was packed from."""
-    packed = encoded(action, target)
-    assert packed < 0
-    assert decoded(packed) == (action, target)
-    assert decoded(0) is None
-    assert decoded(target) is None
+@pytest.mark.parametrize("action", list(EditorAction), ids=lambda action: action.name)
+async def test_every_editor_action_is_answered_by_a_handler(action: EditorAction) -> None:
+    """One registration per action, asserted against the enum and not against a list.
+
+    The router filters on `action`, so an action added to `src/bot/callbacks.py` without a
+    registration here is a button that spins and does nothing (TZ 9) — and a member of an
+    enum is exactly the kind of thing a per-handler test cannot notice missing. Whatever the
+    press means, something has to come back: a screen, or an alert saying the screen is old.
+    """
+    stand = stand_with(make_item(1, TEMPLATE_ID, text="wipe the bar"))
+    await stand.opens()
+    before = len(session_of(stand.bot).calls)
+
+    await stand.presses(command(TEMPLATE_ID, action, 1))
+
+    assert len(session_of(stand.bot).calls) > before, f"nothing answers {action.name}"
 
 
 def test_a_command_button_still_fits_the_callback_budget() -> None:
     """Decision D14: the widest thing this block can pack is a command against a full-width
     `BIGINT` line id, and Telegram truncates anything over 64 bytes into another payload."""
-    packed = command(2**63 - 1, EditorCommand.MOVE_UP, 2**63 - 1)
+    packed = command(2**63 - 1, EditorAction.MOVE_UP, 2**63 - 1)
     assert len(packed.encode()) <= 64
+
+
+def test_a_command_carries_the_action_and_never_a_group_index() -> None:
+    """`EditorGroup` is what its name says again: the commands left that field for good.
+
+    The regression this holds on to is the one the arithmetic made possible — a press that
+    parsed as an ordinary «open group N» because its number happened to be read that way.
+    """
+    packed = parse(command(TEMPLATE_ID, EditorAction.REWORD, 41))
+    assert isinstance(packed, EditorCommand)
+    assert (packed.action, packed.template_id, packed.target) == (
+        EditorAction.REWORD,
+        TEMPLATE_ID,
+        41,
+    )
+    group = parse(EditorGroup(template_id=TEMPLATE_ID, group_index=1).pack())
+    assert isinstance(group, EditorGroup)
 
 
 # --------------------------------------------------------------------------------------
@@ -667,7 +736,8 @@ def test_a_command_button_still_fits_the_callback_budget() -> None:
 def test_the_router_is_named_and_registers_the_screens() -> None:
     instance = admin_checklists.router()
     assert instance.name == "admin_checklists"
-    assert len(instance.callback_query.handlers) == 7
+    # `OpenAdmin`, `EditorGroup`, one per `EditorAction`, and the four `EditorLine*`.
+    assert len(instance.callback_query.handlers) == 2 + len(EditorAction) + 4
     assert len(instance.message.handlers) == 4
 
 

@@ -39,9 +39,14 @@ reported as a gap in the service layer rather than fixed here with SQL.
 **The wizard's steps are told apart by the FSM state, not by the payload.** The two presses
 of the wizard both travel on :class:`~src.bot.callbacks.ShiftMember` — the person step
 because that is what the factory means, the "use the venue's default window" button because
-what it has to say is *whose* shift is about to be saved. `src/bot/keyboards/schedule.py`
-documents why a new factory was not declared, and the entry button's stopgap payload with
-it. A press that arrives in neither state is answered as the stale screen it is (TZ 9).
+what it has to say is *whose* shift is about to be saved (`src/bot/keyboards/schedule.py`).
+A press that arrives in neither state is answered as the stale screen it is (TZ 9).
+
+**The role is checked by the resolver on every press of this block, and by hand on the two
+typed steps.** `AdminCommand`, `ShiftMember`, `ShiftShow`, `ShiftOpener`, `ShiftCloser` and
+`ShiftDelete` all carry `minimum_role=MANAGER` in `src/bot/middlewares/resolver.py`, so the
+callback handlers below check nothing themselves. No resolver runs on a message, so
+:func:`take_date` and :func:`take_window` do (TZ 9).
 """
 
 from __future__ import annotations
@@ -58,6 +63,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.callbacks import (
+    AdminAction,
+    AdminCommand,
     AdminSection,
     OpenAdmin,
     ShiftCloser,
@@ -65,11 +72,9 @@ from src.bot.callbacks import (
     ShiftMember,
     ShiftOpener,
     ShiftShow,
-    TimezoneChoice,
 )
 from src.bot.handlers.admin import Event, deliver, refuse
 from src.bot.handlers.admin_venue import window_in
-from src.bot.keyboards.schedule import ScheduleCommand
 from src.bot.states import ShiftWizard
 from src.bot.views import Screen
 from src.bot.views import schedule as screens
@@ -271,18 +276,13 @@ async def start_wizard(
 ) -> None:
     """`SCHEDULE_ADD_BUTTON`: step 1, who works it (TZ 5.8).
 
-    The role is checked here because it has to be. This press travels on `TimezoneChoice`
-    (see `src/bot/keyboards/schedule.py`), whose resolver rule is `needs_actor=False` — it
-    has to be, since the create-venue wizard uses the same factory before any membership
-    exists — so nothing upstream has asked whether the presser may manage this venue (TZ 9).
+    No role check here: the press carries `AdminCommand(SHIFT_NEW)`, whose rule in the
+    resolver is `minimum_role=MANAGER`, so a bartender is refused before this runs (TZ 9).
 
     Nobody to roster is not an error and does not start a scenario: the screen says so and
     offers the employees section, and no state is set, so the next line typed is not read
     as an answer to a question that was never asked (TZ 8.1).
     """
-    if not actor.is_manager:
-        await refuse(callback)
-        return
     entries = await services.members.list_assignable(actor)
     if entries:
         await state.set_state(ShiftWizard.person)
@@ -328,6 +328,10 @@ async def take_date(
     from `datetime.now()`: at half past midnight in Vladivostok the UTC date is still
     yesterday, and a bot that inferred the year off it would put a New Year's Eve shift a
     year out (TZ 3.4, decision D12).
+
+    The role is checked here and can be nowhere else: the resolver runs on callback queries
+    only, so a step left open by somebody who has since been demoted is stopped by this line
+    (TZ 9).
     """
     if not actor.is_manager:
         await state.clear()
@@ -364,6 +368,8 @@ async def take_window(
     Half a window is not a window, and neither is a line with one reading on it —
     `window_in` wants two and re-asks otherwise, with the venue's default still one tap away
     rather than a bare apology (TZ 8.2).
+
+    A typed step, so the role is checked here for the reason :func:`take_date` gives.
     """
     if not actor.is_manager:
         await state.clear()
@@ -679,18 +685,16 @@ def router() -> Router:
     date (a main-menu press is intercepted before any of this by
     `src/bot/middlewares/menu.py`).
 
-    The `SCHEDULE_ADD_BUTTON` registration filters `TimezoneChoice` on an index no zone has
-    and no other block claims — `src/bot/keyboards/schedule.py` explains why it is on that
-    factory at all. `src/bot/handlers/admin_venue.py` is included before this router and
-    filters the same factory on `index >= 0` and on three exact negative values, so the two
-    sets cannot overlap.
+    `SCHEDULE_ADD_BUTTON` filters `AdminCommand` on the one action that means "start the
+    shift wizard"; the other blocks of the section filter the same factory on actions of
+    their own, so nothing here can swallow theirs.
     """
     instance = Router(name=ROUTER_NAME)
     instance.callback_query.register(
         open_schedule, OpenAdmin.filter(F.section == AdminSection.SCHEDULE)
     )
     instance.callback_query.register(
-        start_wizard, TimezoneChoice.filter(F.index == ScheduleCommand.ADD_SHIFT.value)
+        start_wizard, AdminCommand.filter(F.action == AdminAction.SHIFT_NEW)
     )
     instance.callback_query.register(
         pick_person, ShiftMember.filter(), StateFilter(ShiftWizard.person)
