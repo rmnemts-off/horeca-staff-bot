@@ -37,7 +37,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.methods import SendMessage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, Update
 from src.bot import handlers, routers, texts
-from src.bot.callbacks import Callback, MenuAction, MenuKeep, OpenSection
+from src.bot.callbacks import MenuAction, MenuKeep, OpenSection, registered
 from src.bot.dispatcher import (
     FSM_KEY_PREFIX,
     FSM_TTL,
@@ -166,9 +166,16 @@ def test_every_callback_factory_is_answered_by_somebody() -> None:
     """
     dispatcher = build_dispatcher(storage=MemoryStorage())
     routed = _routed_factories(dispatcher)
+    # `registered()` and not `Callback.__subclasses__()`. The two differ by the classes that
+    # never finished being declared: `__pydantic_init_subclass__` refuses a factory over the
+    # budget or with a foreign separator *after* Python has created the class object, so a
+    # `class Wide(Callback, ...)` inside `pytest.raises` in `test_callbacks.py` is a real
+    # subclass until the garbage collector gets to it — and whether it has is a matter of
+    # timing, which is why this test passed on a laptop and failed in CI. `REGISTRY` holds
+    # only what was accepted, which is also the only thing that can reach a keyboard.
     dangling = {
         name: reason
-        for factory in Callback.__subclasses__()
+        for factory in registered()
         if (name := factory.__name__) not in routed
         and (reason := UNROUTED.get(name, "nothing answers it")) == "nothing answers it"
     }
