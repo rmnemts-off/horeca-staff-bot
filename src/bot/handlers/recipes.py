@@ -27,9 +27,10 @@ Two things this section cannot do yet, and neither is a decision of this module:
   section is not part of stage 0, and a composition line pointing at a prep is therefore
   printed rather than linked.
 
-**The card is HTML** (`TTK_CARD_NAME_TEMPLATE` is `<b>{name}</b>`) and the views quote what
-the venue typed, but nothing in this project sets a default parse mode yet — see the report
-of task 25. Until it does, the tags arrive as characters.
+**The card is HTML** (`TTK_CARD_NAME_TEMPLATE` is `<b>{name}</b>`), which is a property of
+the whole process: `build_bot` sets the parse mode once (`src/bot/dispatcher.py`). That is
+why every view quotes what the venue typed before formatting it in — with the mode on and
+the quoting off, a bar called «Rum & Cola» makes Telegram reject the message whole.
 """
 
 from __future__ import annotations
