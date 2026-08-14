@@ -678,7 +678,13 @@ class NotificationRepository(Protocol):
         claimed_at: dt.datetime | None,
     ) -> None: ...
 
-    async def reschedule(self, notification_id: int, scheduled_at: dt.datetime) -> None: ...
+    async def reschedule(
+        self,
+        notification_id: int,
+        scheduled_at: dt.datetime,
+        *,
+        claimed_at: dt.datetime | None = None,
+    ) -> None: ...
 
     async def cancel_for_entity(self, *, entity: str, entity_id: int) -> int: ...
 

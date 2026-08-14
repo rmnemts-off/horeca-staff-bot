@@ -574,8 +574,7 @@ class NotificationService:
             entity_id=shift_id,
         )
         return any(
-            row.type == notification_type and row.status is NotificationStatus.SENT
-            for row in rows
+            row.type == notification_type and row.status is NotificationStatus.SENT for row in rows
         )
 
     async def shift_removed(self, shift_id: int) -> int:

@@ -413,7 +413,13 @@ class FakeNotifications:
     ) -> None:
         raise NotImplementedError
 
-    async def reschedule(self, notification_id: int, scheduled_at: dt.datetime) -> None:
+    async def reschedule(
+        self,
+        notification_id: int,
+        scheduled_at: dt.datetime,
+        *,
+        claimed_at: dt.datetime | None = None,
+    ) -> None:
         raise NotImplementedError
 
     async def list_for_entity(self, *, entity: str, entity_id: int) -> Sequence[Notification]:

@@ -280,11 +280,24 @@ class NotificationRepo(BaseRepository[Notification]):
         )
         await self.session.execute(stmt)
 
-    async def reschedule(self, notification_id: int, scheduled_at: dt.datetime) -> None:
+    async def reschedule(
+        self,
+        notification_id: int,
+        scheduled_at: dt.datetime,
+        *,
+        claimed_at: dt.datetime | None = None,
+    ) -> None:
         """Move a row to another moment, or put a failed one back into the queue.
 
         A `sent` or `cancelled` row is history and is left alone: rescheduling it would
         deliver the same message twice.
+
+        `claimed_at` is the claim token, and it matters for the one caller that has one:
+        the worker putting a row back after `TelegramRetryAfter`. By then its claim may
+        already be gone — `reclaim_stale` returned the row and a second worker took it —
+        and moving it without checking would strip that worker's claim mid-delivery, which
+        is the double send `mark_sent` refuses for exactly the same reason. Omitted by a
+        caller that never held a claim (the schedule moved, the venue's lead time changed).
         """
         stmt = (
             update(Notification)
@@ -301,6 +314,13 @@ class NotificationRepo(BaseRepository[Notification]):
             )
             .execution_options(synchronize_session=False)
         )
+        if claimed_at is not None:
+            stmt = stmt.where(
+                or_(
+                    Notification.status != NotificationStatus.SENDING,
+                    Notification.claimed_at == claimed_at,
+                )
+            )
         await self.session.execute(stmt)
 
     async def cancel_for_entity(self, *, entity: str, entity_id: int) -> int:

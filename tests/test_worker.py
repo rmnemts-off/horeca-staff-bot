@@ -138,7 +138,8 @@ class FakeNotifications:
       clears the token and counts the abandoned attempt;
     * ``mark_sent`` and ``mark_failed`` match on status *and* token, so a report from a
       worker whose claim was handed on changes nothing at all;
-    * ``reschedule`` leaves ``sent`` and ``cancelled`` rows alone and clears the token.
+    * ``reschedule`` leaves ``sent`` and ``cancelled`` rows alone, refuses a row whose
+      claim has been handed on, and clears the token on the one it does move.
     """
 
     def __init__(self, venue_id: int = VENUE_ID, store: list[Notification] | None = None) -> None:
@@ -208,9 +209,28 @@ class FakeNotifications:
         row.claimed_at = None
         row.attempts += 1
 
-    async def reschedule(self, notification_id: int, scheduled_at: dt.datetime) -> None:
+    async def reschedule(
+        self,
+        notification_id: int,
+        scheduled_at: dt.datetime,
+        *,
+        claimed_at: dt.datetime | None = None,
+    ) -> None:
+        """The real predicate, token included (`src/db/repositories/notifications.py`).
+
+        A fake that ignored the token would make the worker's `TelegramRetryAfter` branch
+        green against a repository that refuses the same call — which is the divergence
+        CLAUDE.md is about.
+        """
         row = self._scoped(notification_id)
         if row is None or row.status in {NotificationStatus.SENT, NotificationStatus.CANCELLED}:
+            return
+        if (
+            claimed_at is not None
+            and row.status is NotificationStatus.SENDING
+            and row.claimed_at != claimed_at
+        ):
+            # Somebody else holds this row now: the reclaim happened while we were sending.
             return
         row.status = NotificationStatus.SCHEDULED
         row.scheduled_at = scheduled_at
@@ -567,6 +587,43 @@ async def test_retry_after_puts_the_row_back_instead_of_failing_it() -> None:
     assert second.sent == 1
     assert row.status is NotificationStatus.SENT
     assert sent_count(bot) == 2, "the first call is the one Telegram refused"
+
+
+async def test_a_pause_does_not_strip_a_claim_that_now_belongs_to_somebody_else() -> None:
+    """The other side of `mark_sent`'s token check, on the one branch that also writes.
+
+    While Telegram was answering "too many requests", this row could have been reclaimed —
+    `reclaim_stale` returns a row abandoned by a dead process — and taken by a second
+    worker. Moving it then would strip that worker's claim in the middle of its delivery,
+    and the row would go out twice (criterion 11.4).
+    """
+    row = make_notification(1)
+    bot = make_bot()
+    session_of(bot).fail_with["SendMessage"] = TelegramRetryAfter(
+        method=SendMessage(chat_id=TELEGRAM_ID, text=MESSAGE_TEXT),
+        message="Too Many Requests",
+        retry_after=30,
+    )
+    with use_clock(FixedClock(NOW)):
+        worker, notifications, _, _ = build([row], bot=bot)
+        # Somebody else's claim, taken between our claim and Telegram's answer.
+        stolen = NOW + dt.timedelta(seconds=5)
+
+        async def steal(*_: object, **__: object) -> None:
+            row.status = NotificationStatus.SENDING
+            row.claimed_at = stolen
+
+        original = notifications.reschedule
+
+        async def reschedule_after_the_theft(*args: object, **kwargs: object) -> None:
+            await steal()
+            await original(*args, **kwargs)  # type: ignore[arg-type]
+
+        notifications.reschedule = reschedule_after_the_theft  # type: ignore[method-assign]
+        await worker.run_once()
+
+    assert row.status is NotificationStatus.SENDING, "the other worker still holds it"
+    assert row.claimed_at == stolen, "its claim is untouched"
 
 
 async def test_an_unknown_type_fails_the_row_and_not_the_loop() -> None:

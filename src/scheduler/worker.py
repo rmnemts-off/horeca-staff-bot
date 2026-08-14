@@ -339,6 +339,9 @@ class NotificationWorker:
                 await queue.notifications.reschedule(
                     notification.id,
                     utc_now() + dt.timedelta(seconds=error.retry_after),
+                    # The claim may already be gone: `reclaim_stale` could have returned
+                    # this row and a second worker taken it while Telegram was answering.
+                    claimed_at=token,
                 )
                 report.rescheduled += 1
                 return
