@@ -98,9 +98,15 @@ EDITOR_TEXT_PROMPT: Final = "Напишите пункт."
 EDITOR_GROUP_PROMPT: Final = "Название группы?"
 #: Decision B6: the whole checklist in one message — a line is a line, «# Название» opens
 #: a group. Forty lines through a step-by-step wizard is an hour on a phone (TZ 7).
+#:
+#: The third sentence is decision B11 and is not decoration: `parse_bulk` glues an indented
+#: line onto the item above it, and a syntax nobody is told about is a syntax that does not
+#: exist — the manager whose item ran onto a second line would get two broken items and no
+#: idea why.
 EDITOR_BULK_PROMPT: Final = (
     "Пришлите пункты одним сообщением: каждая строка — пункт, "
-    "строка вида «# Станция» открывает новую группу."
+    "строка вида «# Станция» открывает новую группу. "
+    "Строка, начатая с отступа, продолжает предыдущий пункт."
 )
 EDITOR_BULK_RESULT_TEMPLATE: Final = "Добавил {added}, групп: {groups}."
 #: Decision B3: a template already used by a run is copied instead of edited in place.
