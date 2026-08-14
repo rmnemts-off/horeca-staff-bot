@@ -24,15 +24,13 @@ from a screen one level deeper — and all three land on the same function here.
 navigation buttons that lead to the *main* menu (`HOME`, `CANCEL`, and `BACK` with no
 section) belong here too, because the main menu is nobody else's screen.
 
-**The gap this screen still has.** TZ 5.4 wants the opening checklist reopenable from
-the shift screen, and the button is built and tested (`src/bot/keyboards/shifts.py`) — but
-nothing here can find the run it names. :class:`~src.services.checklists.ChecklistService`
-reads a run by id and creates one for a shift; it has no read *by shift*, and
-``ChecklistRunRepository.get_by_shift`` is called only from inside ``create_run``. Asking
-the repository from a handler is precisely what TZ 3.2 and
-`tests/bot/test_handler_boundary.py` forbid, and writing the lookup here would put the
-rule "which run belongs to this shift" in two places. So the button is not drawn yet and
-the missing method is named in the report accompanying this change.
+**Getting back into the checklist** (TZ 5.4: the message was swiped away, or simply
+scrolled past). The shift screen offers the button, and the run it names comes from
+``ChecklistService.run_for_shift`` — a read, never a create. Opening this screen an hour
+before the shift must not bring the checklist forward: the bot decides when it arrives
+(principle 1.4#2), and the moment is `opening_checklist_lead_minutes` before the start.
+So a shift with no run yet simply has no button, which is also the state of every shift
+whose template is still empty (decision B1).
 """
 
 from __future__ import annotations
@@ -53,6 +51,7 @@ from src.bot.middlewares.services import SERVICES_KEY, VenueServices
 from src.bot.safe_edit import safe_edit
 from src.bot.views import Screen
 from src.bot.views.shifts import schedule_screen, shift_screen
+from src.db.models import ChecklistType
 from src.services.access import AccessContext
 from src.services.shifts import ShiftView
 from src.services.timezones import utc_now
@@ -130,11 +129,28 @@ async def open_shift(event: Message | CallbackQuery, **data: Any) -> None:
     moment = utc_now()
     shift: ShiftView | None = await services.shifts.nearest_shift(actor, now=moment)
     roster: tuple[ShiftView, ...] = ()
+    run_id: int | None = None
     if shift is not None:
         roster = await services.shifts.roster(actor, shift.shift_date)
-    # `checklist_run_id` stays absent until the service can answer "which run belongs to
-    # this shift" — see the module docstring and the report.
-    await _draw(event, shift_screen(shift, now=moment, roster=roster), data=data)
+        run_id = await _opening_run_of(services, shift)
+    await _draw(
+        event,
+        shift_screen(shift, now=moment, roster=roster, checklist_run_id=run_id),
+        data=data,
+    )
+
+
+async def _opening_run_of(services: VenueServices, shift: ShiftView) -> int | None:
+    """The opening checklist already sent for this shift, if there is one (TZ 5.4).
+
+    A finished run keeps its button: TZ 5.4 lets the employee look at what they ticked, and
+    the checklist screen refuses to change a completed run on its own.
+    """
+    run = await services.checklists.run_for_shift(
+        shift_id=shift.shift_id,
+        checklist_type=ChecklistType.OPENING,
+    )
+    return None if run is None else run.run_id
 
 
 async def open_schedule(event: Message | CallbackQuery, **data: Any) -> None:

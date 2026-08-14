@@ -454,6 +454,30 @@ class ChecklistService:
             return None
         return await self._build_view(run)
 
+    async def run_for_shift(
+        self,
+        *,
+        shift_id: int,
+        checklist_type: ChecklistType,
+    ) -> RunView | None:
+        """The run already sent for this shift, or ``None`` if none was.
+
+        The shift screen of TZ 5.3 offers a way back into the checklist — the employee
+        swiped the message away, or simply scrolled past it — and the button carries a
+        ``run_id`` it has to get from somewhere. Without this the screen either draws no
+        button at all (which is what it did) or the handler reaches for a repository, which
+        is the one thing `tests/bot/test_handler_boundary.py` exists to prevent.
+
+        **This never creates anything.** Creation is the worker's, at the moment TZ 5.4
+        names (`opening_checklist_lead_minutes` before the shift), and opening the shift
+        screen an hour earlier must not bring the checklist forward — the whole point of
+        principle 1.4#2 is that the bot decides when, not the employee.
+        """
+        run = await self._runs.get_by_shift(shift_id, checklist_type)
+        if run is None:
+            return None
+        return await self._build_view(run)
+
     async def _build_view(self, run: ChecklistRun) -> RunView:
         """Wording from ``run.template_id``, composition from the run's own rows.
 

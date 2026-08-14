@@ -49,8 +49,9 @@ from src.bot.keyboards.menu import home_button
 from src.bot.middlewares.auth import ACTOR_KEY
 from src.bot.middlewares.services import SERVICES_KEY
 from src.bot.views.shifts import schedule_screen, shift_screen
-from src.db.models import Shift, ShiftSource, ShiftStatus
+from src.db.models import ChecklistType, RunStatus, Shift, ShiftSource, ShiftStatus
 from src.services.access import AccessContext
+from src.services.checklists import RunView
 from src.services.shifts import ShiftView, shift_hours
 from src.services.timezones import FixedClock, shift_window, use_clock, venue_timezone
 
@@ -406,11 +407,38 @@ class FakeShiftService:
         return self._fortnight
 
 
+class FakeChecklistService:
+    """Answers "which run belongs to this shift" and records what it was asked.
+
+    A read, and only a read: the shift screen must not be able to bring the checklist
+    forward by being opened early (principle 1.4#2), so this fake has no `create_run` at
+    all — a handler that reached for one would fail here rather than in production.
+    """
+
+    def __init__(self, run: RunView | None = None) -> None:
+        self._run = run
+        self.asked: list[tuple[int, ChecklistType]] = []
+
+    async def run_for_shift(
+        self,
+        *,
+        shift_id: int,
+        checklist_type: ChecklistType,
+    ) -> RunView | None:
+        self.asked.append((shift_id, checklist_type))
+        return self._run
+
+
 class FakeServices:
     """The venue bundle, cut down to what this module reads off it."""
 
-    def __init__(self, shifts: FakeShiftService) -> None:
+    def __init__(
+        self,
+        shifts: FakeShiftService,
+        checklists: FakeChecklistService | None = None,
+    ) -> None:
         self.shifts = shifts
+        self.checklists = checklists if checklists is not None else FakeChecklistService()
 
 
 def build_stand() -> tuple[Dispatcher, Bot, FSMContext]:
@@ -475,6 +503,71 @@ async def test_the_roster_is_asked_for_the_date_of_the_shift_not_for_today() -> 
 
     assert shifts.roster_dates == [DAY]
     assert shifts.asked_at == [HALF_PAST_MIDNIGHT], "the clock of the project, passed down"
+
+
+def _payloads_sent(bot: Bot) -> list[str]:
+    """Every `callback_data` on the keyboards of the messages this bot sent."""
+    found: list[str] = []
+    for call in session_of(bot).calls:
+        markup = getattr(call, "reply_markup", None)
+        if not isinstance(markup, InlineKeyboardMarkup):
+            continue
+        for row in markup.inline_keyboard:
+            found.extend(button.callback_data for button in row if button.callback_data)
+    return found
+
+
+def run_view(run_id: int, *, shift_id: int) -> RunView:
+    """A run with no items: this screen only ever reads its id."""
+    return RunView(
+        run_id=run_id,
+        template_id=1,
+        checklist_type=ChecklistType.OPENING,
+        status=RunStatus.SENT,
+        shift_id=shift_id,
+        user_id=STAFF.user_id,
+        chat_id=None,
+        message_id=None,
+        sent_at=None,
+        started_at=None,
+        completed_at=None,
+        skip_comment=None,
+        groups=(),
+    )
+
+
+async def test_the_shift_screen_offers_the_checklist_that_was_already_sent() -> None:
+    """TZ 5.4: the message was swiped away, and this is the way back into it."""
+    shift = view_of(make_shift(1))
+    checklists = FakeChecklistService(run_view(77, shift_id=shift.shift_id))
+    services = FakeServices(FakeShiftService(nearest=shift, roster=(shift,)), checklists)
+    dispatcher, bot, _ = build_stand()
+
+    with use_clock(FixedClock(utc(2026, 8, 13, 9, 0))):
+        await feed(dispatcher, bot, caption_update(texts.MENU_SHIFT_BUTTON), services)
+
+    assert checklists.asked == [(shift.shift_id, ChecklistType.OPENING)]
+    assert ChecklistShow(run_id=77).pack() in _payloads_sent(bot), (
+        "the run exists, so the way back into it has to be on the screen"
+    )
+
+
+async def test_a_shift_whose_checklist_has_not_been_sent_yet_offers_no_button() -> None:
+    """Principle 1.4#2: the bot decides when the checklist arrives, not the employee.
+
+    Opening the shift screen an hour early must not bring it forward, so the absence of a
+    run is an ordinary state of this screen and not a reason to create one.
+    """
+    shift = view_of(make_shift(1))
+    checklists = FakeChecklistService(None)
+    services = FakeServices(FakeShiftService(nearest=shift, roster=(shift,)), checklists)
+    dispatcher, bot, _ = build_stand()
+
+    with use_clock(FixedClock(utc(2026, 8, 13, 9, 0))):
+        await feed(dispatcher, bot, caption_update(texts.MENU_SHIFT_BUTTON), services)
+
+    opening = ChecklistShow(run_id=77).pack().split(":", 1)[0]
+    assert all(not payload.startswith(opening) for payload in _payloads_sent(bot))
 
 
 async def test_an_empty_schedule_asks_the_service_for_no_roster_at_all() -> None:
