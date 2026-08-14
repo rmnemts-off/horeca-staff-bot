@@ -8,6 +8,7 @@ Telegram-бот для персонала баров и кафе. Заказчи
 | Что | Где |
 |---|---|
 | Техническое задание (единственный источник истины) | [docs/TZ-barpoint-staff-bot.md](docs/TZ-barpoint-staff-bot.md) |
+| **Передача проекта: функционал экран за экраном, что осталось, что чинить** | [docs/handover.md](docs/handover.md) |
 | Стартовый промпт проекта | [docs/prompt-for-claude-code.md](docs/prompt-for-claude-code.md) |
 | Референсная таблица — **образец формата, не данные** | `tests/fixtures/reference/Invasion.xlsx` |
 

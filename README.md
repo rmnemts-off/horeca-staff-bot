@@ -12,6 +12,7 @@ Telegram-бот для персонала баров и кафе. Заказчи
 | Что | Где |
 |---|---|
 | Техническое задание — единственный источник истины | [docs/TZ-barpoint-staff-bot.md](docs/TZ-barpoint-staff-bot.md) |
+| **Начать отсюда, если проект для вас новый** | [docs/handover.md](docs/handover.md) |
 | План этапа 0 и технические решения D1–D20 | [docs/stage0-plan.md](docs/stage0-plan.md) |
 | Ответы заказчика и решения, принятые самостоятельно | [docs/decisions-stage0.md](docs/decisions-stage0.md) |
 | Правила работы с кодовой базой | [CLAUDE.md](CLAUDE.md) |
