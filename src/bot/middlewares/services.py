@@ -71,6 +71,7 @@ from src.services.audit import AuditSink, AuditTrail
 from src.services.checklists import ChecklistService, ReopenableRunRepository
 from src.services.members import MemberService
 from src.services.notifications import NotificationService
+from src.services.overdue import OverdueService
 from src.services.recipes import RecipeService
 from src.services.shifts import ShiftService
 from src.services.templates import TemplateService
@@ -127,6 +128,7 @@ class VenueServices:
     repositories: VenueRepositories
     members: MemberService
     checklists: ChecklistService
+    overdue: OverdueService
     templates: TemplateService
     recipes: RecipeService
     shifts: ShiftService
@@ -232,16 +234,27 @@ class Container:
             notifications=repositories.notifications,
             recipients=self.access,
         )
+        # Hoisted out of the call below because the overdue sweep is built *on* it: the
+        # sweep decides which runs are late and hands each one to the same service that
+        # owns the transition, so both must be the one object (plan task 31).
+        checklists = ChecklistService(
+            templates=repositories.templates,
+            items=repositories.items,
+            runs=repositories.runs,
+            run_items=repositories.run_items,
+            notifier=notifications,
+        )
         return VenueServices(
             venue=venue,
             repositories=repositories,
             members=MemberService(self._bundle, audit=trail),
-            checklists=ChecklistService(
-                templates=repositories.templates,
-                items=repositories.items,
+            checklists=checklists,
+            overdue=OverdueService(
+                timezone=venue.timezone,
                 runs=repositories.runs,
-                run_items=repositories.run_items,
-                notifier=notifications,
+                shifts=repositories.shifts,
+                settings=repositories.settings,
+                checklists=checklists,
             ),
             templates=TemplateService(
                 templates=repositories.templates,

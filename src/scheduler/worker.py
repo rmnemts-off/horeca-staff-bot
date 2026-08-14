@@ -90,6 +90,7 @@ from src.services.notifications import (
     RendererNotRegisteredError,
     UnknownNotificationTypeError,
 )
+from src.services.overdue import OverdueSweeper
 from src.services.timezones import utc_now
 
 logger = get_logger("scheduler.worker")
@@ -155,6 +156,9 @@ class VenueQueue(Protocol):
     def users(self) -> UserRepository: ...
 
     @property
+    def overdue(self) -> OverdueSweeper: ...
+
+    @property
     def registry(self) -> NotificationRegistry: ...
 
 
@@ -180,6 +184,8 @@ class PassReport:
     deferred: int = 0
     #: Passes over a venue that raised before reaching a row.
     errors: int = 0
+    #: Checklists that went past their deadline on this pass (TZ section 6).
+    overdue: int = 0
 
     @property
     def delivered(self) -> int:
@@ -256,6 +262,7 @@ class NotificationWorker:
         return report
 
     async def _venue_pass(self, venue_id: int, now: dt.datetime, report: PassReport) -> None:
+        await self._report_overdue(venue_id, now, report)
         claimed = await self._claim(venue_id, now, report)
         for notification in claimed:
             try:
@@ -269,6 +276,26 @@ class NotificationWorker:
                     extra={"venue_id": venue_id, "notification_id": notification.id},
                 )
                 report.deferred += 1
+
+    async def _report_overdue(self, venue_id: int, now: dt.datetime, report: PassReport) -> None:
+        """The other half of TZ section 6: a checklist nobody finished (plan task 31).
+
+        Its own transaction, before the delivery pass and not inside it, for two reasons.
+        The sweep *writes* — it moves a run to `overdue` and queues a message to the manager
+        — so it must not share a unit of work with a delivery that may roll back on a
+        Telegram error. And running it first means a run that goes past its deadline this
+        minute is reported in the same pass rather than the next one.
+
+        A failure here does not stop delivery: a venue whose sweep raised still gets its
+        queue drained, because a message already queued is owed to somebody regardless.
+        """
+        try:
+            async with self._workspace(venue_id) as queue:
+                swept = await queue.overdue.run(now=now)
+        except Exception:
+            logger.exception("the overdue sweep failed", extra={"venue_id": venue_id})
+            return
+        report.overdue += swept.reported
 
     async def _claim(
         self,

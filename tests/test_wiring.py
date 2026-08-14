@@ -79,6 +79,7 @@ from src.services.audit import AuditSink, AuditTrail
 from src.services.checklists import ChecklistService
 from src.services.members import MemberRepositories, MemberService
 from src.services.notifications import NotificationService
+from src.services.overdue import OverdueService
 from src.services.recipes import RecipeService
 from src.services.shifts import ShiftService
 from src.services.templates import TemplateService
@@ -282,6 +283,7 @@ class Services:
     members: MemberService
     notifications: NotificationService
     checklists: ChecklistService
+    overdue: OverdueService
     templates: TemplateService
     recipes: RecipeService
     shifts: ShiftService
@@ -315,17 +317,26 @@ def build_services(session: AsyncSession) -> Services:
         notifications=NotificationRepo(session, VENUE_ID),
         recipients=access,
     )
+
+    checklists = ChecklistService(
+        templates=ChecklistTemplateRepo(session, VENUE_ID),
+        items=ChecklistItemRepo(session, VENUE_ID),
+        runs=ChecklistRunRepo(session, VENUE_ID),
+        run_items=ChecklistRunItemRepo(session, VENUE_ID),
+        notifier=notifications,
+    )
     return Services(
         access=access,
         venues=VenueService(venue_repositories),
         members=MemberService(member_repositories, audit=trail),
         notifications=notifications,
-        checklists=ChecklistService(
-            templates=ChecklistTemplateRepo(session, VENUE_ID),
-            items=ChecklistItemRepo(session, VENUE_ID),
+        checklists=checklists,
+        overdue=OverdueService(
+            timezone=TIMEZONE,
             runs=ChecklistRunRepo(session, VENUE_ID),
-            run_items=ChecklistRunItemRepo(session, VENUE_ID),
-            notifier=notifications,
+            shifts=ShiftRepo(session, VENUE_ID),
+            settings=VenueSettingsRepo(session, VENUE_ID),
+            checklists=checklists,
         ),
         templates=TemplateService(
             templates=ChecklistTemplateRepo(session, VENUE_ID),

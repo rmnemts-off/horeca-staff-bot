@@ -62,6 +62,7 @@ from src.services.notifications import (
     OutgoingMessage,
     dedup_key,
 )
+from src.services.overdue import SweepReport
 from src.services.timezones import FixedClock, use_clock
 
 from tests.bot.test_middlewares import CHAT_ID, make_bot, session_of
@@ -345,6 +346,7 @@ class FakeQueue:
     notifications: FakeNotifications
     users: FakeUsers
     registry: NotificationRegistry
+    overdue: FakeOverdue = field(default_factory=lambda: FakeOverdue())
 
 
 @dataclass
@@ -352,9 +354,11 @@ class FakeWorkspace:
     """Opens a "transaction" per venue, and can die inside one.
 
     ``crash_at_open`` is how a process that stops between the claim and the send is staged:
-    the claim is the first block a pass opens, the first delivery is the second, so
-    ``crash_at_open=2`` leaves a committed claim behind and no message. That is precisely
-    the state criterion 11.4 asks about.
+    a pass opens the overdue sweep first, then the claim, then one block per delivery, so
+    ``crash_at_open=3`` leaves a committed claim behind and no message. That is precisely
+    the state criterion 11.4 asks about. The number is spelled out rather than derived
+    because deriving it from the worker's own structure is how a test stops noticing that
+    the structure changed.
     """
 
     queues: Mapping[int, FakeQueue]
@@ -370,6 +374,26 @@ class FakeWorkspace:
         if self.crash_at_open is not None and self.opened >= self.crash_at_open:
             raise WorkerCrashError(f"the worker died while working on venue {venue_id}")
         yield self.queues[venue_id]
+
+
+class FakeOverdue:
+    """`OverdueService` as the worker uses it: one call per venue per pass.
+
+    Counts the calls and reports nothing, because what the worker owes this collaborator is
+    exactly one call — the sweep's own decisions are `tests/services/test_overdue.py`.
+    """
+
+    def __init__(self, reported: int = 0) -> None:
+        self.reported = reported
+        self.calls: list[dt.datetime] = []
+        #: Set by the test that checks a failing sweep does not stop delivery.
+        self.explode = False
+
+    async def run(self, *, now: dt.datetime) -> SweepReport:
+        self.calls.append(now)
+        if self.explode:
+            raise RuntimeError("the sweep failed")
+        return SweepReport(examined=len(self.calls), reported=self.reported)
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +458,17 @@ def build(
         venues=FakeVenues(venue_ids),
         workspace=FakeWorkspace(queues, crash_at_open=crash_at_open),
     )
+    QUEUES[id(worker)] = queues
     return worker, queues[VENUE_ID].notifications, people, telegram
+
+
+#: The queues each built worker was given, so a test can look at a collaborator the
+#: worker holds privately. Keyed by identity because a worker is not hashable.
+QUEUES: dict[int, dict[int, FakeQueue]] = {}
+
+
+def worker_queues(worker: NotificationWorker) -> dict[int, FakeQueue]:
+    return QUEUES[id(worker)]
 
 
 def _message(chat_id: int = TELEGRAM_ID, text: str = MESSAGE_TEXT) -> OutgoingMessage:
@@ -461,7 +495,7 @@ async def test_a_crash_between_sending_and_sent_delivers_exactly_once() -> None:
     row = make_notification(1)
     clock = FixedClock(NOW)
     with use_clock(clock):
-        crashing, queue, _, dead_bot = build([row], crash_at_open=2)
+        crashing, queue, _, dead_bot = build([row], crash_at_open=3)
         report = await crashing.run_once()
 
         assert report.claimed == 1
@@ -624,6 +658,37 @@ async def test_a_pause_does_not_strip_a_claim_that_now_belongs_to_somebody_else(
 
     assert row.status is NotificationStatus.SENDING, "the other worker still holds it"
     assert row.claimed_at == stolen, "its claim is untouched"
+
+
+async def test_every_pass_sweeps_the_overdue_checklists_of_every_venue() -> None:
+    """TZ section 6: «checklist overdue» is a scheduled notification like any other.
+
+    `ChecklistService.report_overdue` was written to be asked every tick and to answer once;
+    for a whole wave nothing asked, so the type was declared, rendered, tested — and never
+    sent. This is the assertion that the worker asks.
+    """
+    with use_clock(FixedClock(NOW)):
+        worker, _, _, _ = build([], venue_ids=(VENUE_ID, OTHER_VENUE_ID))
+        report = await worker.run_once()
+
+    swept = [queue.overdue for queue in worker_queues(worker).values()]
+    assert [len(sweep.calls) for sweep in swept] == [1, 1], "once per venue per pass"
+    assert all(sweep.calls == [NOW] for sweep in swept), "the clock of the project, passed down"
+    assert report.overdue == 0, "nothing was late, and the counter says so"
+
+
+async def test_a_sweep_that_raises_does_not_stop_the_delivery_of_the_same_venue() -> None:
+    """A message already in the queue is owed to somebody, whatever the sweep did."""
+    row = make_notification(1)
+    with use_clock(FixedClock(NOW)):
+        worker, _, _, bot = build([row])
+        for queue in worker_queues(worker).values():
+            queue.overdue.explode = True
+        report = await worker.run_once()
+
+    assert report.sent == 1
+    assert row.status is NotificationStatus.SENT
+    assert sent_count(bot) == 1
 
 
 async def test_an_unknown_type_fails_the_row_and_not_the_loop() -> None:

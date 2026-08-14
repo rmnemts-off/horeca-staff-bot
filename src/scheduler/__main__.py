@@ -41,6 +41,7 @@ from src.db.session import dispose_engine, session_scope
 from src.logging import configure_logging, get_logger
 from src.scheduler.worker import NotificationWorker, VenueQueue
 from src.services.notifications import NotificationRegistry, UnknownVenueError
+from src.services.overdue import OverdueService
 
 logger = get_logger("scheduler")
 
@@ -51,6 +52,7 @@ class SessionQueue:
 
     notifications: NotificationRepository
     users: UserRepository
+    overdue: OverdueService
     registry: NotificationRegistry
 
 
@@ -86,6 +88,7 @@ async def venue_queue(venue_id: int) -> AsyncIterator[VenueQueue]:
         yield SessionQueue(
             notifications=services.repositories.notifications,
             users=services.repositories.users,
+            overdue=services.overdue,
             registry=stage_zero_registry(
                 RenderDeps(
                     checklists=services.checklists,
