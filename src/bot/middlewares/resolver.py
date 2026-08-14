@@ -57,6 +57,7 @@ from src.bot.callbacks import (
     EditorLineCritical,
     EditorLineDelete,
     EditorLinePhoto,
+    InviteConfirm,
     InviteRevoke,
     InviteRole,
     MalformedCallbackError,
@@ -75,6 +76,7 @@ from src.bot.callbacks import (
     ShiftOpener,
     ShiftShow,
     TimezoneChoice,
+    VenueCreate,
     VenueSelect,
     parse,
 )
@@ -443,6 +445,26 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
         subject=Subject(ChecklistTemplate, "template_id", load_template, OWN),
     ),
     # -- before there is a venue to scope anything to (TZ 5.1, decision A3) ------------
+    InviteConfirm: Rule(
+        needs_actor=False,
+        note=(
+            "the answer to «is this your name?», pressed by somebody the bot has never "
+            "seen: TZ 5.1 lets an invite code make a membership, so requiring one here "
+            "would refuse every first-time employee. Nothing is granted by the press — "
+            "the code itself is in the FSM state and AccessService.activate_invite_code "
+            "re-reads it, so an expired, revoked or spent code dies there as usual"
+        ),
+    ),
+    VenueCreate: Rule(
+        needs_actor=False,
+        note=(
+            "decision A3: the wizard runs before the first venue exists, so there is no "
+            "membership to check and nothing venue-scoped to fetch. The gate in "
+            "src/bot/middlewares/auth.py is what lets such an update through at all, and "
+            "it does so only for a telegram_id that OWNER_TELEGRAM_IDS names and that "
+            "belongs to no venue (Identity.may_create_venue)"
+        ),
+    ),
     VenueSelect: Rule(
         needs_actor=False,
         note=(

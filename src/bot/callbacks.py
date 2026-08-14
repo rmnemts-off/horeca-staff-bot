@@ -463,6 +463,24 @@ class InviteRevoke(Callback, prefix="iv"):
     code_id: int
 
 
+class InviteConfirm(Callback, prefix="ic"):
+    """Yes / "correct the name" under the name a code carries (TZ 5.1, decision B8).
+
+    One factory with a flag rather than two: the two buttons are the two answers to one
+    question, and answers declared apart are answers one of which is forgotten when the
+    question is reworded.
+
+    It names no row, and cannot. The code the answer belongs to is a *string* typed by
+    somebody the bot has never seen, so it lives in the FSM state where rule 2 of this
+    module's docstring puts every string a scenario has to remember; the venue it points at
+    is not settled until `AccessService.activate_invite_code` has read it, which is also
+    the check this button ultimately passes through.
+    """
+
+    #: `True` is «the manager wrote it down correctly»; `False` opens `Onboarding.name`.
+    is_correct: bool
+
+
 class ShiftShow(Callback, prefix="sw"):
     """One shift in the manager's schedule (TZ 5.3, 5.8)."""
 
@@ -534,6 +552,18 @@ class VenueSelect(Callback, prefix="vs"):
     venue_id: int
 
 
+class VenueCreate(Callback, prefix="vc"):
+    """Open the "create a venue" wizard from the onboarding screen (decision A3).
+
+    The one button of this bot that is pressed from *outside* every venue, which is why it
+    is neither an :class:`OpenSection` nor an :class:`OpenAdmin`: both of those are read as
+    "a member of this venue asks for one of its screens", and the bootstrap owner of
+    decision A3 is a member of nowhere at the moment he presses this. There is therefore
+    nothing to scope, nothing to check against a membership and no id worth carrying — the
+    wizard's first question is the venue's name, and the venue does not exist yet.
+    """
+
+
 class TimezoneChoice(Callback, prefix="tz"):
     """A zone from the list the wizard is showing (TZ 3.4, plan task 26).
 
@@ -567,6 +597,7 @@ __all__ = [
     "EditorLineDelete",
     "EditorLinePhoto",
     "ForeignSeparatorError",
+    "InviteConfirm",
     "InviteRevoke",
     "InviteRole",
     "MalformedCallbackError",
@@ -588,6 +619,7 @@ __all__ = [
     "ShiftShow",
     "TimezoneChoice",
     "UnknownCallbackError",
+    "VenueCreate",
     "VenueSelect",
     "factory_for",
     "parse",

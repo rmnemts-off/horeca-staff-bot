@@ -75,7 +75,7 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import secrets
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
@@ -460,6 +460,31 @@ class AccessService:
             raise UnknownMembershipError(user_id, venue_id)
         await self.repositories.users.set_active_venue(user_id, venue_id)
         return _context(user, member)
+
+    async def venue_names(self, venue_ids: Iterable[int]) -> Mapping[int, str]:
+        """Venue id -> name, for the screens that run before a venue is chosen (TZ 5.1).
+
+        Onboarding says the venue's name out loud three times — on the invite preview, in
+        the list somebody working in two places picks from and in the line that confirms the
+        membership — and every one of those screens is drawn while ``data["venue"]`` is still
+        empty, because the
+        venue context is built from a membership that does not exist yet
+        (``src/bot/middlewares/venue.py``). A handler may not open a repository itself
+        (TZ 3.2), so the lookup lives here, next to the other question that has to be
+        answered before a venue is known.
+
+        An id with no row is simply absent from the result rather than an error: the caller
+        is a screen, and a venue that was deleted between the code being issued and the link
+        being followed is a case it has to render either way. Activity is deliberately not
+        judged here — whether a switched-off venue may still be entered is a rule of TZ 5.1
+        and not of a name lookup.
+        """
+        names: dict[int, str] = {}
+        for venue_id in dict.fromkeys(venue_ids):
+            venue = await self.repositories.venues.get(venue_id)
+            if venue is not None:
+                names[venue_id] = venue.name
+        return names
 
     async def _contexts_for(self, user: User) -> tuple[AccessContext, ...]:
         found: list[AccessContext] = []
