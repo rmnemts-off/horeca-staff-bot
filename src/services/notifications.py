@@ -82,6 +82,7 @@ from zoneinfo import ZoneInfo
 from src.db.models import (
     ChecklistType,
     Notification,
+    NotificationStatus,
     Shift,
     ShiftStatus,
 )
@@ -144,6 +145,9 @@ class ScheduleOutcome(enum.StrEnum):
     CANCELLED = "cancelled"
     #: The shift is over; there is nothing left to open.
     IN_THE_PAST = "in_the_past"
+    #: This checklist has already been delivered for this shift, so the queue is left alone
+    #: (see :meth:`NotificationService.shift_saved`).
+    ALREADY_SENT = "already_sent"
 
 
 # --------------------------------------------------------------------------------------
@@ -497,6 +501,17 @@ class NotificationService:
 
         A shift that no longer wants it — the opener flag was moved to somebody else, or
         the shift was cancelled — has its live rows cancelled rather than left to fire.
+
+        **A checklist that has already gone out is not queued a second time.** The partial
+        unique index behind ``dedup_key`` covers the live half of the queue only (see the
+        constant), which is what lets an opener be removed and put back; the same property
+        means a *delivered* row holds no key, so without the check below any later edit of
+        the shift — a closer assigned at three in the afternoon, an end time corrected —
+        would insert a fresh row and the opener would receive the whole checklist again in
+        the middle of their shift. Worse than the noise: the run already exists, so the
+        renderer draws it again and ``checklist_runs.message_id`` moves to the new copy,
+        and the message the bartender has been ticking stops being the one the bot updates
+        (criterion 11.4, TZ 8.2, decision D11).
         """
         if shift.venue_id != self._venue_id:
             raise ForeignShiftError(self._venue_id, shift.venue_id)
@@ -519,6 +534,11 @@ class NotificationService:
                 cancelled=await self.shift_removed(shift.id),
             )
 
+        if await self._already_delivered(shift.id, NotificationType.OPENING_CHECKLIST):
+            # Delivered rows are history and are left exactly as they are — cancelling one
+            # would rewrite the record of a message that was really sent.
+            return ScheduleResult(outcome=ScheduleOutcome.ALREADY_SENT)
+
         moment = opening_checklist_moment(
             shift_start=start,
             lead_minutes=await self._opening_lead_minutes(),
@@ -540,6 +560,23 @@ class NotificationService:
         )
         outcome = ScheduleOutcome.IMMEDIATE if moment <= now else ScheduleOutcome.SCHEDULED
         return ScheduleResult(outcome=outcome, notification=notification, scheduled_at=moment)
+
+    async def _already_delivered(self, shift_id: int, notification_type: str) -> bool:
+        """Whether a row of this type for this shift has already reached its recipient.
+
+        Asked of the queue rather than of the checklist service, because the queue is what
+        the answer is about: a run may exist for other reasons (an employee who opened the
+        checklist from the shift screen), and a run may be missing after a delivery that
+        found the template empty — in both cases what must not happen twice is the *push*.
+        """
+        rows = await self._notifications.list_for_entity(
+            entity=SHIFT_ENTITY,
+            entity_id=shift_id,
+        )
+        return any(
+            row.type == notification_type and row.status is NotificationStatus.SENT
+            for row in rows
+        )
 
     async def shift_removed(self, shift_id: int) -> int:
         """Cancel every live row bound to a shift (TZ 6: a deleted shift notifies nobody).
@@ -615,6 +652,14 @@ class NotificationService:
 
         "Immediate" means ``scheduled_at = now()`` and nothing else (TZ 6). The recipient
         is part of the key: two managers are two rows, and each is deduplicated on its own.
+
+        **The subject reaches the key and not the `entity` columns.** Those two columns
+        exist for one purpose — :meth:`shift_removed` cancels by them — and an event that
+        has already happened is not cancelled by anything: "the template was empty when
+        Anna's shift opened" stays true after the shift is deleted, and the manager still
+        has to hear it. Writing `entity='shift'` on these rows put them in the path of
+        `cancel_for_entity`, so deleting the shift silently withdrew the alert about it,
+        which is precisely the report nobody would then notice was missing.
         """
         entity, entity_id = subject
         moment = utc_now()
@@ -630,7 +675,7 @@ class NotificationService:
                     key_parts=parts,
                     scheduled_at=moment,
                     user_id=user_id,
-                    entity_id=entity_id,
+                    entity_id=None,
                     payload=payload,
                 )
             )

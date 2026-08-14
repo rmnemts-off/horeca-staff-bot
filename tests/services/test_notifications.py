@@ -58,7 +58,6 @@ from src.services.checklists import (
     PendingItemsAlert,
 )
 from src.services.notifications import (
-    CHECKLIST_RUN_ENTITY,
     SHIFT_ENTITY,
     DuplicateNotificationTypeError,
     ForeignShiftError,
@@ -618,6 +617,38 @@ async def test_changing_the_lead_moves_the_moment_of_one_row() -> None:
     assert second.notification is first.notification
 
 
+async def test_a_checklist_that_has_gone_out_is_not_queued_a_second_time() -> None:
+    """Criterion 11.4, and the failure it names is not theoretical.
+
+    The partial unique index behind `dedup_key` covers the live half of the queue only, so
+    a delivered row holds no key. Without the guard in `shift_saved`, an ordinary edit made
+    while the shift is running — the manager assigns a closer at three in the afternoon —
+    inserts a second row, and the opener receives the whole opening checklist again. The
+    run already exists, so the second delivery redraws it and moves
+    `checklist_runs.message_id` onto the new copy: the message the bartender has been
+    ticking stops being the one the bot updates (TZ 8.2, decision D11).
+    """
+    stand = build(lead_minutes=10)
+    shift = make_shift()
+    with use_clock(FixedClock(NOW)):
+        queued = await stand.service.shift_saved(shift)
+
+    assert queued.notification is not None
+    queued.notification.status = NotificationStatus.SENT
+
+    # Three in the afternoon of the same shift: any edit at all goes through the scheduler
+    # (plan task 16), and this one has nothing to do with the moment the checklist went out.
+    with use_clock(FixedClock(utc(2026, 8, 13, 12, 0))):
+        again = await stand.service.shift_saved(shift)
+
+    assert again.outcome is ScheduleOutcome.ALREADY_SENT
+    assert again.notification is None
+    assert len(stand.notifications.rows) == 1, "a delivered checklist must not be re-queued"
+    assert stand.notifications.rows[0].status is NotificationStatus.SENT, (
+        "the delivered row is history and is left exactly as it was"
+    )
+
+
 async def test_a_moment_that_has_passed_becomes_now() -> None:
     """The acceptance run: a shift created five minutes before it starts, lead of ten."""
     stand = build()
@@ -885,21 +916,27 @@ async def test_the_skipped_notification_carries_the_items_critical_first() -> No
     assert [item["item_id"] for item in items] == [3, 1]
     assert payload["skip_comment"] == "no delivery"
     assert payload["run_id"] == RUN_ID
-    assert stand.notifications.rows[0].entity == CHECKLIST_RUN_ENTITY
 
 
-async def test_the_overdue_notification_is_bound_to_the_run() -> None:
+async def test_the_overdue_notification_names_the_run_in_its_payload() -> None:
     stand = build()
     with use_clock(FixedClock(NOW)):
         await stand.service.checklist_overdue(make_pending_alert())
 
     row = stand.notifications.rows[0]
     assert row.type == str(NotificationType.CHECKLIST_OVERDUE)
-    assert (row.entity, row.entity_id) == (CHECKLIST_RUN_ENTITY, RUN_ID)
+    assert row.payload["run_id"] == RUN_ID
 
 
-async def test_the_empty_template_notification_is_bound_to_the_shift() -> None:
-    """TZ 8.1: nothing goes to the employee, and deleting the shift takes this row with it."""
+async def test_an_alert_to_the_manager_is_not_cancelled_by_deleting_the_shift() -> None:
+    """TZ 8.1 and TZ 6: the report of something that happened is not withdrawn.
+
+    `entity`/`entity_id` exist so that `shift_removed` can cancel what a shift had *planned*.
+    An event that already happened is not a plan: "the template was empty when Anna's shift
+    opened" stays true after the shift is deleted, and the manager still has to hear it.
+    While these rows carried `entity='shift'`, deleting the shift withdrew the alert about
+    it — and a report nobody receives is a report nobody notices is missing.
+    """
     stand = build()
     alert = EmptyTemplateAlert(
         checklist_type=ChecklistType.OPENING,
@@ -911,9 +948,14 @@ async def test_the_empty_template_notification_is_bound_to_the_shift() -> None:
         await stand.service.checklist_template_empty(alert)
 
     row = stand.notifications.rows[0]
-    assert (row.entity, row.entity_id) == (SHIFT_ENTITY, SHIFT_ID)
     assert row.user_id == MANAGER_ID
     assert row.payload["template_id"] == 3
+    assert (row.entity, row.entity_id) == (None, None)
+
+    cancelled = await stand.service.shift_removed(SHIFT_ID)
+
+    assert cancelled == 0
+    assert stand.notifications.live == [row], "the manager's alert survives the deletion"
 
 
 async def test_an_empty_template_without_a_shift_is_still_reported() -> None:
