@@ -42,7 +42,6 @@ import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import AnswerCallbackQuery, SendMessage, TelegramMethod
@@ -105,6 +104,7 @@ from src.bot.middlewares.throttling import (
     budget_for,
 )
 from src.bot.middlewares.venue import VENUE_ID_KEY, VENUE_KEY, VenueContextMiddleware
+from src.bot.states import RecipeSearch, VenueWizard
 from src.db.models import (
     ChecklistItem,
     ChecklistRun,
@@ -1369,10 +1369,14 @@ def test_the_fake_repositories_are_a_subject_repositories() -> None:
 # keyboard and an inline button — are answered the same way.
 
 
-class Wizard(StatesGroup):
-    """A step-by-step scenario of TZ 5.8, reduced to the one state it is open in."""
-
-    name = State()
+#: A step-by-step scenario, standing in for every wizard of TZ 5.8.
+#:
+#: The real `VenueWizard` and not a group declared here, because the interception of TZ 5.2
+#: asks about a scenario only when `src/bot/states/` says that scenario holds unsaved input
+#: (:func:`~src.bot.states.keeps_unsaved_input`). A stand-in declared in a test file is not
+#: in that set, so it would exercise the *screen* branch while claiming to exercise the
+#: wizard one — green, and about the wrong half of the rule.
+Wizard: Final = VenueWizard
 
 
 SECTION_PRESS: Final = OpenSection(section=MenuAction.MY_SHIFT).pack()
@@ -1391,6 +1395,30 @@ async def open_scenario(state: FSMContext, **typed: Any) -> dict[str, Any]:
     if typed:
         await state.update_data(**typed)
     return {STATE_KEY: state, RAW_STATE_KEY: Wizard.name.state}
+
+
+async def test_a_menu_press_after_a_search_asks_nothing_at_all() -> None:
+    """TZ 5.2 asks «only when there is unsaved data», and a search is not unsaved data.
+
+    `RecipeSearch` keeps the words searched for and the page of hits in the state, because
+    pagination and «report the recipe is missing» both need them and free text may not
+    travel in a button. Read as "a scenario with data", that made every press of the main
+    menu after any search ask whether to interrupt — about a search whose answer the person
+    had already read. A prompt shown when nothing is at stake is a prompt people learn to
+    dismiss unread, and then it fails to stop the one case it exists for.
+    """
+    bot = make_bot()
+    middleware, state = menu_stand()
+    await state.set_state(RecipeSearch.results)
+    await state.update_data(query="mohito", offset=10)
+    data = {STATE_KEY: state, RAW_STATE_KEY: RecipeSearch.results.state}
+    handler = Handler()
+
+    await middleware(handler, make_callback(SECTION_PRESS, bot=bot), data)
+
+    assert handler.was_called, "the section is served, not questioned"
+    assert session_of(bot).sent_texts() == [], "nothing was asked"
+    assert await state.get_state() is None, "and the screen state is dropped on the way"
 
 
 async def test_a_section_button_over_unsaved_data_asks_first() -> None:

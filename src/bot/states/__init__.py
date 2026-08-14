@@ -29,6 +29,8 @@ ids go into the button. The 64-byte budget is why, and it is enforced at import.
 
 from __future__ import annotations
 
+from typing import Final
+
 from aiogram.fsm.state import State, StatesGroup
 
 
@@ -160,7 +162,48 @@ class RecipeWizard(StatesGroup):
     instruction = State()
 
 
+#: Groups whose half-filled input is worth a question before it is dropped (TZ 5.2:
+#: "asks only when there is unsaved data").
+#:
+#: :class:`RecipeSearch` is deliberately absent, and that absence is the whole point of the
+#: set. What it keeps in the state is not input — it is where the screen is: the words
+#: searched for and the page of hits, remembered because pagination and "report the recipe
+#: is missing" both need them and free text may not travel in a button. Counting that as
+#: unsaved data meant that after any search at all, every press of the main menu asked
+#: whether to interrupt and warned that the input would be lost — about a search whose
+#: answer the person had already read. A question asked when there is nothing to lose is a
+#: question people learn to dismiss unread, which costs exactly the wizard this mechanism
+#: exists to protect.
+WIZARDS: Final[frozenset[str]] = frozenset(
+    {
+        ChecklistSkip.__name__,
+        InviteWizard.__name__,
+        Onboarding.__name__,
+        RecipeWizard.__name__,
+        SettingsEdit.__name__,
+        ShiftWizard.__name__,
+        TemplateEditor.__name__,
+        VenueWizard.__name__,
+    }
+)
+
+
+def keeps_unsaved_input(raw_state: str | None) -> bool:
+    """Whether dropping this scenario loses something the person typed (TZ 5.2).
+
+    `raw_state` is aiogram's own `"Group:step"` string, which is what the interception
+    middleware holds; a state of a group nobody declared above is treated as a screen and
+    not as a wizard, so a new group added at stage 1 has to opt *in* to being asked about.
+    That is the safe default here: an unnecessary question is noise on every press, while a
+    missing one costs one form, once, and only if somebody forgot this line.
+    """
+    if raw_state is None:
+        return False
+    return raw_state.split(":", 1)[0] in WIZARDS
+
+
 __all__ = [
+    "WIZARDS",
     "ChecklistSkip",
     "InviteWizard",
     "Onboarding",
@@ -170,4 +213,5 @@ __all__ = [
     "ShiftWizard",
     "TemplateEditor",
     "VenueWizard",
+    "keeps_unsaved_input",
 ]

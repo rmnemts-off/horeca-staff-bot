@@ -708,15 +708,28 @@ async def test_nothing_planned_is_an_empty_answer_not_a_failure(stand: Stand) ->
     assert await stand.service.roster(STAFF, DAY) == ()
 
 
+def test_the_horizon_is_two_weeks_and_the_number_is_written_down_once() -> None:
+    """TZ 5.3 says «график на две недели», and fourteen is the whole of that sentence.
+
+    Asserted against a literal on purpose. The test below used to build its shifts *out of*
+    `SCHEDULE_HORIZON_DAYS` and compare against the same constant, so setting the horizon to
+    sixty days would have kept every assertion green — a test that cannot fail is worse than
+    none, because it reads as coverage.
+    """
+    assert SCHEDULE_HORIZON_DAYS == 14
+
+
 async def test_the_fortnight_covers_two_weeks_including_today(stand: Stand) -> None:
-    for offset in (0, SCHEDULE_HORIZON_DAYS - 1, SCHEDULE_HORIZON_DAYS):
+    for offset in (0, 13, 14):
         stand.add(shift_date=DAY + dt.timedelta(days=offset))
     yesterday = stand.add(shift_date=DAY - dt.timedelta(days=1))
 
     views = await stand.service.fortnight(STAFF, now=utc(2026, 8, 13, 9, 0))
 
     dates = [view.shift_date for view in views]
-    assert dates == [DAY, DAY + dt.timedelta(days=SCHEDULE_HORIZON_DAYS - 1)]
+    assert dates == [DAY, DAY + dt.timedelta(days=13)], (
+        "today plus thirteen is two weeks; the fifteenth day is outside and yesterday is past"
+    )
     assert yesterday.shift_date not in dates
 
 

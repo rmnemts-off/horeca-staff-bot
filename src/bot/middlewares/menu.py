@@ -31,6 +31,15 @@ where it was. Either answer takes the question out of the chat: a question that 
 answered is not a screen, and left hanging it is a live keyboard pointing at a scenario
 that no longer exists.
 
+**"Unsaved data" is a scenario, not a non-empty dictionary.** The question of TZ 5.2 is
+worth asking about a half-filled wizard and about nothing else; `src/bot/states/` says
+which groups those are (:func:`~src.bot.states.keeps_unsaved_input`). A screen that merely
+remembers where it is — the recipe search keeps the query and the page, because free text
+cannot travel in a button — used to look identical to a wizard from here, so every press of
+the main menu after a search asked whether to interrupt something the person had already
+finished. That is not a small annoyance: a prompt shown when nothing is at stake is a
+prompt people learn to dismiss unread, and then it fails to stop the one case it exists for.
+
 **Both roads into the menu are the same road.** A section is opened by a caption on the
 reply keyboard *and* by an inline `OpenSection` button, and TZ 5.2 does not distinguish
 them: unsaved data is asked about, an untouched scenario is dropped in silence. So the
@@ -60,6 +69,7 @@ from src.bot import texts
 from src.bot.callbacks import CallbackError, MenuAction, MenuKeep, OpenSection, parse
 from src.bot.keyboards.menu import action_for
 from src.bot.middlewares.errors import inner_event
+from src.bot.states import keeps_unsaved_input
 
 #: aiogram's own key for the FSM context of the update.
 STATE_KEY: Final = "state"
@@ -145,9 +155,10 @@ class MenuInterceptMiddleware(BaseMiddleware):
         state: FSMContext,
         action: MenuAction,
     ) -> Any:
-        if data.get(RAW_STATE_KEY) is None:
+        raw_state = data.get(RAW_STATE_KEY)
+        if raw_state is None:
             return await handler(event, data)
-        if await state.get_data():
+        if keeps_unsaved_input(str(raw_state)) and await state.get_data():
             # TZ 5.2: ask, and only now. The scenario is left exactly as it was, so
             # "carry on" needs to restore nothing.
             await message.answer(
@@ -184,7 +195,11 @@ class MenuInterceptMiddleware(BaseMiddleware):
             await self._drop(state, data)
             await self._close_question(screen)
             return await handler(event, data)
-        if screen is not None and await state.get_data():
+        if (
+            screen is not None
+            and keeps_unsaved_input(str(data.get(RAW_STATE_KEY)))
+            and await state.get_data()
+        ):
             # The same rule as the caption road (TZ 5.2), and the same question.
             await callback.answer()
             await screen.answer(

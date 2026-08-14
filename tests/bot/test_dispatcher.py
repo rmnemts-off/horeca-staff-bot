@@ -31,7 +31,6 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
@@ -55,6 +54,7 @@ from src.bot.middlewares.services import ServicesMiddleware
 from src.bot.middlewares.throttling import ThrottlingMiddleware
 from src.bot.middlewares.venue import VenueContextMiddleware
 from src.bot.safe_edit import EditOutcome, safe_edit
+from src.bot.states import VenueWizard
 from src.config import settings
 
 from tests.bot.test_middlewares import (
@@ -71,10 +71,14 @@ MENU_CAPTION: Final = texts.MENU_SHIFT_BUTTON
 HIDDEN_CAPTION: Final = texts.MENU_WRITEOFF_BUTTON
 
 
-class Wizard(StatesGroup):
-    """A step-by-step scenario, standing in for every wizard of TZ 5.8."""
-
-    name = State()
+#: A step-by-step scenario, standing in for every wizard of TZ 5.8.
+#:
+#: The real `VenueWizard` and not a group declared here, because the interception of TZ 5.2
+#: asks about a scenario only when `src/bot/states/` says that scenario holds unsaved input
+#: (:func:`~src.bot.states.keeps_unsaved_input`). A stand-in declared in a test file is not
+#: in that set, so it would exercise the *screen* branch while claiming to exercise the
+#: wizard one — green, and about the wrong half of the rule.
+Wizard: Final = VenueWizard
 
 
 # --------------------------------------------------------------------------------------
