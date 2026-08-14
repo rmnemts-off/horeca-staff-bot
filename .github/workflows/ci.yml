@@ -109,8 +109,20 @@ jobs:
         run: alembic upgrade head
 
       # ---- tests ---------------------------------------------------------------------
+      # The failure is echoed as `::error::` lines and not left in the log alone, because
+      # the log of a public repository is readable only to somebody with a token: a red run
+      # whose reason lives there is a red run that has to be reproduced from scratch by
+      # whoever sees it. The annotations are part of the check output and need none.
       - name: pytest
-        run: pytest -q -rs
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q -rs --tb=short 2>&1 | tee "${RUNNER_TEMP}/pytest.log" && exit 0
+          while IFS= read -r line; do
+            echo "::error::${line}"
+          done < <(grep -E '^(FAILED|ERROR)' "${RUNNER_TEMP}/pytest.log" | head -30)
+          echo "::error::$(tail -3 "${RUNNER_TEMP}/pytest.log" | tr '\n' ' ')"
+          exit 1
 
       # db-marked tests skip themselves when the database is unreachable, which is right
       # on a laptop and wrong here: a green run full of skips would mean criterion 11.5
