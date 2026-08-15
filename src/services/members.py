@@ -44,6 +44,8 @@ from src.services.access import (
     AccessContext,
     AccessError,
     require_manager,
+    require_not_self,
+    require_outranks_target,
     require_owner,
     require_venue,
     role_rank,
@@ -168,14 +170,29 @@ class MemberService:
     # -- lifecycle ----------------------------------------------------------------------
 
     async def deactivate(self, actor: AccessContext, member_id: int) -> RosterEntry:
-        """The employee left: the row stays, the history stays, access stops (TZ 5.1)."""
+        """The employee left: the row stays, the history stays, access stops (TZ 5.1).
+
+        Two things this refuses, both of them one-way doors (TZ 2). Switching *yourself*
+        off takes away every screen including this one, and the code that would let you
+        back in can only be issued by an owner — of whom there is now one fewer. A manager
+        switching the *owner* off arrives at the same place by the other road.
+        """
         require_manager(actor)
-        return await self._set_active(actor, member_id, is_active=False)
+        current = await self._require_member(actor, member_id)
+        require_not_self(actor, current)
+        require_outranks_target(actor, current)
+        return await self._set_active(actor, current, is_active=False)
 
     async def reactivate(self, actor: AccessContext, member_id: int) -> RosterEntry:
-        """The employee came back to the same venue and keeps their old row."""
+        """The employee came back to the same venue and keeps their old row.
+
+        No `require_not_self` here: bringing yourself back is unreachable — a switched-off
+        member gets no screens at all — and it is not the direction that loses anything.
+        """
         require_manager(actor)
-        return await self._set_active(actor, member_id, is_active=True)
+        current = await self._require_member(actor, member_id)
+        require_outranks_target(actor, current)
+        return await self._set_active(actor, current, is_active=True)
 
     async def set_role(
         self,
@@ -183,12 +200,16 @@ class MemberService:
         member_id: int,
         role: MemberRole,
     ) -> RosterEntry:
-        """Change a role. Handing out `manager` or `owner` is the owner's alone (TZ 2)."""
+        """Change a role. Handing out `manager` or `owner` is the owner's alone (TZ 2).
+
+        Own role included in what nobody changes about themselves: an owner who demotes
+        himself cannot promote himself back, because promoting needs an owner.
+        """
         require_manager(actor)
         current = await self._require_member(actor, member_id)
-        if role_rank(role) >= role_rank(MemberRole.MANAGER) or role_rank(current.role) >= role_rank(
-            MemberRole.MANAGER
-        ):
+        require_not_self(actor, current)
+        require_outranks_target(actor, current)
+        if role_rank(role) >= role_rank(MemberRole.MANAGER):
             require_owner(actor)
         return await self._update(actor, member_id, role=role)
 
@@ -243,11 +264,12 @@ class MemberService:
     async def _set_active(
         self,
         actor: AccessContext,
-        member_id: int,
+        current: VenueMember,
         *,
         is_active: bool,
     ) -> RosterEntry:
-        current = await self._require_member(actor, member_id)
+        """The row is already loaded and already checked: the guards need it, not the id."""
+        member_id = current.id
         was_active = current.is_active
         member = await self.repositories.members(actor.venue_id).set_active(
             member_id,

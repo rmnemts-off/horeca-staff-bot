@@ -189,6 +189,7 @@ class MemberSetRole(Callback, prefix="mr"):
     member_id: int
     role: MemberRole
 
+
 class MemberRebind(Callback, prefix="mb"):
     member_id: int
 ```

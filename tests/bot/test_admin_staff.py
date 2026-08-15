@@ -478,10 +478,40 @@ async def test_an_employee_can_be_brought_back_to_the_same_row() -> None:
 def test_the_card_button_asks_for_the_state_it_wants() -> None:
     """A press says «make them inactive», not «toggle whatever you find»: two managers on
     the same screen must not undo each other."""
-    active = payloads(member_screen(make_entry(7)).markup)
+    active = payloads(member_screen(make_entry(7), actor=OWNER).markup)
     assert MemberActive(member_id=7, is_active=False).pack() in active
-    dismissed = payloads(member_screen(make_entry(7, is_active=False)).markup)
+    dismissed = payloads(member_screen(make_entry(7, is_active=False), actor=OWNER).markup)
     assert MemberActive(member_id=7, is_active=True).pack() in dismissed
+
+
+def test_your_own_card_carries_no_switch() -> None:
+    """TZ 8.1: the server refuses it, so the button must not be there to press.
+
+    The owner of the test venue pressed exactly this button on exactly this card and lost
+    every screen he had. Hiding it is not the protection — `require_not_self` is — but a
+    button that always refuses is the broken button 8.1 is about.
+    """
+    mine = make_entry(OWNER.member_id, role=MemberRole.OWNER)
+
+    buttons = payloads(member_screen(mine, actor=OWNER).markup)
+
+    assert not any(button.startswith(MemberActive.__prefix__) for button in buttons)
+
+
+def test_a_manager_sees_no_switch_on_the_owners_card() -> None:
+    """TZ 2: `manager` may not switch off what it could not create."""
+    chief = make_entry(9, role=MemberRole.OWNER)
+
+    buttons = payloads(member_screen(chief, actor=MANAGER).markup)
+
+    assert not any(button.startswith(MemberActive.__prefix__) for button in buttons)
+
+
+def test_the_owner_still_sees_the_switch_on_somebody_elses_card() -> None:
+    """The card loses the button in two cases and keeps it in every other one."""
+    buttons = payloads(member_screen(make_entry(9), actor=OWNER).markup)
+
+    assert MemberActive(member_id=9, is_active=False).pack() in buttons
 
 
 # --------------------------------------------------------------------------------------

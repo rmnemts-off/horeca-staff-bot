@@ -33,6 +33,7 @@ from src.bot.keyboards.staff import (
 )
 from src.bot.views import Screen, quoted
 from src.db.models import MemberRole
+from src.services.access import AccessContext
 from src.services.members import RosterEntry
 
 #: What `STAFF_LINE_TEMPLATE` writes between the fields of a line. The marks are appended
@@ -81,9 +82,13 @@ def roster_screen(entries: Sequence[RosterEntry]) -> Screen:
     )
 
 
-def member_screen(entry: RosterEntry) -> Screen:
-    """One employee's card: the same line, and what can be done about it (TZ 5.1)."""
-    return Screen(text=roster_line(entry), markup=member_keyboard(entry))
+def member_screen(entry: RosterEntry, *, actor: AccessContext) -> Screen:
+    """One employee's card: the same line, and what can be done about it (TZ 5.1).
+
+    The actor is needed to decide *what* can be done: nobody switches themselves off, and
+    a manager does not switch off the owner (TZ 2).
+    """
+    return Screen(text=roster_line(entry), markup=member_keyboard(entry, actor=actor))
 
 
 def invite_name_screen() -> Screen:

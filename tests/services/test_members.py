@@ -30,7 +30,12 @@ from typing import Any
 
 import pytest
 from src.db.models import MemberRole, User, VenueMember
-from src.services.access import AccessContext, PermissionDeniedError, VenueMismatchError
+from src.services.access import (
+    AccessContext,
+    PermissionDeniedError,
+    SelfTargetError,
+    VenueMismatchError,
+)
 from src.services.members import (
     MemberError,
     MemberNotFoundError,
@@ -685,3 +690,116 @@ def test_a_roster_entry_reads_the_membership_and_nothing_else(stand: Stand) -> N
     assert (entry.member_id, entry.user_id) == (member.id, user.id)
     assert (entry.role, entry.position, entry.is_active) == (MemberRole.STAFF, "bartender", True)
     assert RosterEntry(member=member, user=None).full_name == ""
+
+
+# --------------------------------------------------------------------------------------
+# Operations on oneself, and on somebody who outranks the actor (TZ 2)
+# --------------------------------------------------------------------------------------
+#
+# These are the guards of `require_not_self` and `require_outranks_target`, and they exist
+# because both doors were walked through on the live stand. The owner of the test venue
+# pressed «Отключить» on his own card and lost every screen; the code that would have let
+# him back in is issued by an owner, and there was no longer an active one. The repair was
+# an `UPDATE` in the database, which is not a product.
+#
+# Each test below is mutation-checked: removing the guard it names makes that test — and
+# only that test — fail.
+
+
+async def test_nobody_switches_themselves_off(stand: Stand) -> None:
+    """The one-way door: no screens left, and no owner left to issue the code back."""
+    boss = owner_of(stand)
+    mine = stand.members.rows[-1]
+
+    with pytest.raises(SelfTargetError):
+        await stand.service.deactivate(boss, boss.member_id)
+
+    assert mine.is_active is True
+
+
+async def test_the_guard_recognises_the_actor_by_user_not_only_by_membership(
+    stand: Stand,
+) -> None:
+    """A card rebuilt from another query carries another `member_id`; the person is one.
+
+    Both fields are compared for exactly this: a context whose `member_id` has gone stale
+    still belongs to the same human being, and the door it opens is just as one-way.
+    """
+    boss = owner_of(stand)
+    mine = stand.members.rows[-1]
+    stale = AccessContext(
+        user_id=boss.user_id,
+        telegram_id=boss.telegram_id,
+        venue_id=boss.venue_id,
+        member_id=boss.member_id + 1000,
+        role=boss.role,
+        full_name=boss.full_name,
+        position=boss.position,
+    )
+
+    with pytest.raises(SelfTargetError):
+        await stand.service.deactivate(stale, mine.id)
+
+    assert mine.is_active is True
+
+
+async def test_nobody_changes_their_own_role(stand: Stand) -> None:
+    """An owner who demotes himself cannot promote himself back: promoting needs an owner."""
+    boss = owner_of(stand)
+    mine = stand.members.rows[-1]
+
+    with pytest.raises(SelfTargetError):
+        await stand.service.set_role(boss, boss.member_id, MemberRole.STAFF)
+
+    assert mine.role is MemberRole.OWNER
+
+
+async def test_a_manager_does_not_switch_off_the_owner(stand: Stand) -> None:
+    """The second road to a venue with nobody in charge (TZ 2)."""
+    boss = manager_of(stand)
+    _, chief = seed(stand, full_name="Olga", role=MemberRole.OWNER)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.deactivate(boss, chief.id)
+
+    assert chief.is_active is True
+
+
+async def test_a_manager_does_not_switch_off_another_manager(stand: Stand) -> None:
+    boss = manager_of(stand)
+    _, peer = seed(stand, full_name="Nina", role=MemberRole.MANAGER)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.deactivate(boss, peer.id)
+
+    assert peer.is_active is True
+
+
+async def test_a_manager_does_not_bring_the_owner_back_either(stand: Stand) -> None:
+    """Reactivation is the same authority as deactivation, pointed the other way."""
+    boss = manager_of(stand)
+    _, chief = seed(stand, full_name="Olga", role=MemberRole.OWNER, member_active=False)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.reactivate(boss, chief.id)
+
+    assert chief.is_active is False
+
+
+async def test_the_owner_still_switches_off_a_manager(stand: Stand) -> None:
+    """The guards refuse the two dangerous directions and nothing else (TZ 5.1)."""
+    boss = owner_of(stand)
+    _, hand = seed(stand, full_name="Nina", role=MemberRole.MANAGER)
+
+    entry = await stand.service.deactivate(boss, hand.id)
+
+    assert entry.is_active is False
+
+
+async def test_a_manager_still_switches_off_ordinary_staff(stand: Stand) -> None:
+    boss = manager_of(stand)
+    _, hand = seed(stand, full_name="Nina")
+
+    entry = await stand.service.deactivate(boss, hand.id)
+
+    assert entry.is_active is False

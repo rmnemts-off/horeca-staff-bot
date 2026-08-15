@@ -46,7 +46,7 @@ from src.bot.callbacks import (
 )
 from src.bot.keyboards.menu import submenu, wizard
 from src.db.models import MemberRole
-from src.services.access import AccessContext, role_rank
+from src.services.access import AccessContext, may_act_on, role_rank
 from src.services.members import RosterEntry
 
 #: The role «Добавить» starts a code with. TZ 2 lets every manager hand out `staff`, so this
@@ -170,9 +170,17 @@ def roster_keyboard(entries: Sequence[RosterEntry]) -> InlineKeyboardMarkup:
     return submenu(*rows, back=False)
 
 
-def member_keyboard(entry: RosterEntry) -> InlineKeyboardMarkup:
-    """One employee's card: switch them off or back on, and return to the list."""
-    return submenu([active_button(entry)], [back_to_roster()], back=False)
+def member_keyboard(entry: RosterEntry, *, actor: AccessContext) -> InlineKeyboardMarkup:
+    """One employee's card: switch them off or back on, and return to the list.
+
+    Your own card carries no switch, and neither does the owner's when a manager is
+    looking — TZ 8.1 forbids a button that leads nowhere, and the server refuses both
+    (:func:`~src.services.access.may_act_on`, which is the same rule asked as a question
+    rather than repeated here).
+    """
+    rows = [[active_button(entry)]] if may_act_on(actor, entry.member) else []
+    rows.append([back_to_roster()])
+    return submenu(*rows, back=False)
 
 
 def name_keyboard() -> InlineKeyboardMarkup:

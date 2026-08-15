@@ -71,7 +71,12 @@ from src.bot.views.staff import (
     roster_screen,
 )
 from src.db.models import InviteCode, MemberRole
-from src.services.access import AccessContext, invite_deeplink_payload
+from src.services.access import (
+    AccessContext,
+    PermissionDeniedError,
+    SelfTargetError,
+    invite_deeplink_payload,
+)
 from src.services.members import RosterEntry
 from src.services.timezones import utc_now
 
@@ -202,7 +207,7 @@ async def show_member(
     if entry is None:
         await callback.answer(texts.ERROR_NOT_ALLOWED, show_alert=True)
         return
-    await _render(bot, callback, member_screen(entry))
+    await _render(bot, callback, member_screen(entry, actor=actor))
 
 
 async def set_member_active(
@@ -216,12 +221,25 @@ async def set_member_active(
 
     Neither branch deletes anything: `venue_members.is_active` goes false and the row —
     with every run, shift and write-off hanging off it — stays exactly where it was.
+
+    The two refusals are caught and named. Neither is a failure and neither may read as
+    one: the card that offered the button was drawn before the rule existed, or on another
+    device, and the generic apology over a deliberate refusal sends the manager looking for
+    a bug that is not there (TZ 8.2). The rule itself stays in the service — this only puts
+    a sentence on it.
     """
-    if callback_payload.is_active:
-        entry = await services.members.reactivate(actor, callback_payload.member_id)
-    else:
-        entry = await services.members.deactivate(actor, callback_payload.member_id)
-    await _render(bot, callback, member_screen(entry))
+    try:
+        if callback_payload.is_active:
+            entry = await services.members.reactivate(actor, callback_payload.member_id)
+        else:
+            entry = await services.members.deactivate(actor, callback_payload.member_id)
+    except SelfTargetError:
+        await callback.answer(texts.STAFF_SELF_DEACTIVATE_REFUSED, show_alert=True)
+        return
+    except PermissionDeniedError:
+        await callback.answer(texts.STAFF_OWNER_ONLY_REFUSED, show_alert=True)
+        return
+    await _render(bot, callback, member_screen(entry, actor=actor))
 
 
 # --------------------------------------------------------------------------------------

@@ -180,6 +180,18 @@ class InviteCodeGenerationError(AccessError):
     """Several fresh secrets in a row collided with an existing code."""
 
 
+class SelfTargetError(AccessError):
+    """The actor is the target of their own rights operation (TZ 2).
+
+    Its own class rather than a `PermissionDeniedError`, because the refusal is not about
+    rank: the owner has every right there is and is refused precisely because of that.
+    """
+
+    def __init__(self, member_id: int) -> None:
+        super().__init__(f"member {member_id} is the actor themselves")
+        self.member_id = member_id
+
+
 class UnknownMembershipError(AccessError):
     """The user is not an active member of the venue they asked to work in."""
 
@@ -350,6 +362,51 @@ def require_self_or_manager(actor: AccessContext, user_id: int) -> None:
     """TZ 2: `staff` sees only its own data; a manager sees everyone in the venue."""
     if actor.user_id != user_id:
         require_manager(actor)
+
+
+def require_not_self(actor: AccessContext, member: VenueMember) -> None:
+    """Own role and own access are nobody's to change, least of all their own (TZ 2).
+
+    One of these operations is a trap with no way out, and it has been walked into twice on
+    the live stand. An owner who switches themselves off loses every screen; the code that
+    would bring them back is issued by an owner (:meth:`AccessService.issue_invite_code`
+    requires one), and there is no longer an active one. The only repair is a hand-written
+    `UPDATE` in the database, which is not a product.
+
+    Both fields are compared on purpose: `member_id` is the fast path, `user_id` the one
+    that survives a card rebuilt from a different query.
+    """
+    if member.id == actor.member_id or member.user_id == actor.user_id:
+        raise SelfTargetError(member.id)
+
+
+def require_outranks_target(actor: AccessContext, member: VenueMember) -> None:
+    """A manager does not dispose of a manager or of the owner (TZ 2).
+
+    The mirror of the rule already enforced when a code is issued: `manager` may hand out
+    `staff` and nothing above it, so it may not switch off what it could not create. Left
+    open, it is the second road to a venue with no owner — the first is
+    :func:`require_not_self`.
+    """
+    if role_rank(member.role) >= role_rank(MemberRole.MANAGER):
+        require_owner(actor)
+
+
+def may_act_on(actor: AccessContext, member: VenueMember) -> bool:
+    """The two guards above asked as a question, for the screen that draws the buttons.
+
+    A button the server will refuse is the broken button TZ 8.1 forbids, so the card hides
+    what cannot be pressed. It asks *this* function rather than repeating the condition:
+    a rule written twice is a rule that stops matching itself, which `issuable_roles` in
+    `src/bot/keyboards/staff.py` already demonstrated. Hiding is not the protection —
+    the guards are, and they run again on the server (TZ 9).
+    """
+    try:
+        require_not_self(actor, member)
+        require_outranks_target(actor, member)
+    except AccessError:
+        return False
+    return True
 
 
 def as_utc(moment: dt.datetime) -> dt.datetime:
@@ -811,14 +868,18 @@ __all__ = [
     "InviteRejection",
     "NaiveMomentError",
     "PermissionDeniedError",
+    "SelfTargetError",
     "UnknownMembershipError",
     "VenueMismatchError",
     "as_utc",
     "format_invite_code",
     "invite_deeplink_payload",
+    "may_act_on",
     "new_invite_secret",
     "parse_invite_code",
     "require_manager",
+    "require_not_self",
+    "require_outranks_target",
     "require_owner",
     "require_role",
     "require_self_or_manager",

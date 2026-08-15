@@ -51,6 +51,7 @@ from src.services.venues import VenueConfiguration
 
 from tests.bot.test_admin_schedule import make_entry as make_roster_entry
 from tests.bot.test_admin_schedule import make_view as make_shift_view
+from tests.bot.test_admin_staff import OWNER as STAFF_ACTOR
 from tests.bot.test_admin_staff import make_entry
 from tests.bot.test_checklist import group, item, run_view
 from tests.bot.test_menu import make_shift, view_of
@@ -188,7 +189,7 @@ def test_staff_screens_survive_hostile_text() -> None:
     entry = make_entry(full_name=HOSTILE, position=HOSTILE, role=MemberRole.MANAGER)
     blocked = make_entry(2, full_name=HOSTILE, is_active=False, is_bot_blocked=True)
     assert_telegram_html(staff.roster_screen([entry, blocked]).text)
-    assert_telegram_html(staff.member_screen(entry).text)
+    assert_telegram_html(staff.member_screen(entry, actor=STAFF_ACTOR).text)
     assert_telegram_html(
         staff.invite_code_screen(
             full_name=HOSTILE,

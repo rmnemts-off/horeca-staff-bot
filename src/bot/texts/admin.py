@@ -47,6 +47,13 @@ STAFF_BLOCKED_MARK: Final = "🚫 бот заблокирован"
 STAFF_DEACTIVATE_BUTTON: Final = "Отключить"
 STAFF_ACTIVATE_BUTTON: Final = "Вернуть"
 STAFF_DEACTIVATED_MARK: Final = "не работает"
+#: TZ 2: an owner who switches himself off cannot switch himself back on — the code that
+#: would do it is issued by an owner, and there is now one fewer. Walked into twice on the
+#: live stand before the guard existed; the only repair was an UPDATE in the database.
+STAFF_SELF_DEACTIVATE_REFUSED: Final = "Себя отключить нельзя."
+#: TZ 2: `manager` hands out `staff` and nothing above it, so it does not switch off what
+#: it could not create — the second road to a venue with no owner.
+STAFF_OWNER_ONLY_REFUSED: Final = "Управляющего и владельца отключает только владелец."
 
 #: Decision B8: the manager types the full name when issuing the code.
 INVITE_NAME_PROMPT: Final = "Имя и фамилия сотрудника?"
@@ -255,6 +262,8 @@ __all__ = [
     "STAFF_EMPTY",
     "STAFF_LINE_TEMPLATE",
     "STAFF_LINE_WITH_POSITION_TEMPLATE",
+    "STAFF_OWNER_ONLY_REFUSED",
+    "STAFF_SELF_DEACTIVATE_REFUSED",
     "STAFF_TITLE",
     "VENUE_CITY_PROMPT",
     "VENUE_CREATED_TEMPLATE",
