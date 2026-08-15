@@ -54,6 +54,11 @@ STAFF_SELF_DEACTIVATE_REFUSED: Final = "Себя отключить нельзя
 #: TZ 2: `manager` hands out `staff` and nothing above it, so it does not switch off what
 #: it could not create — the second road to a venue with no owner.
 STAFF_OWNER_ONLY_REFUSED: Final = "Управляющего и владельца отключает только владелец."
+#: TZ 2: the role is somebody else's to change, and an owner who demotes himself cannot
+#: promote himself back — promoting needs an owner.
+STAFF_SELF_ROLE_REFUSED: Final = "Свою роль менять нельзя."
+#: TZ 2: the venue keeps at least one active owner, or nothing can ever be granted again.
+STAFF_LAST_OWNER_REFUSED: Final = "Это последний владелец. Сначала назначьте другого."
 #: TZ 5.8: the section where employees are added is where the codes waiting to be used
 #: belong too. Without this block an issued code was invisible and — worse —
 #: unrevokable the moment the manager left the screen that had just shown it.
@@ -62,6 +67,15 @@ STAFF_INVITE_LINE_TEMPLATE: Final = "{full_name} · {role} · до {until}"
 #: The manager did not write a name on the code (it is optional at the name step).
 STAFF_INVITE_NO_NAME: Final = "без имени"
 STAFF_INVITE_BUTTON_TEMPLATE: Final = "Отозвать {full_name}"
+#: TZ 5.8: «сменить роль/должность». The role is one tap and not a wizard — it is a
+#: choice from three, and it is reversible by tapping another one.
+STAFF_ROLE_CURRENT_TEMPLATE: Final = "✓ {role}"
+STAFF_ROLE_CHANGED_TEMPLATE: Final = "{full_name} теперь {role}."
+#: Decision B8 promised the manager could correct a name later; until now it could not.
+STAFF_RENAME_BUTTON: Final = "Имя"
+STAFF_POSITION_BUTTON: Final = "Должность"
+STAFF_RENAME_PROMPT: Final = "Как записать сотрудника?"
+STAFF_POSITION_PROMPT: Final = "Какая должность? Можно пропустить."
 
 #: Decision B8: the manager types the full name when issuing the code.
 INVITE_NAME_PROMPT: Final = "Имя и фамилия сотрудника?"
@@ -271,11 +285,19 @@ __all__ = [
     "STAFF_INVITE_BUTTON_TEMPLATE",
     "STAFF_INVITE_LINE_TEMPLATE",
     "STAFF_INVITE_NO_NAME",
+    "STAFF_LAST_OWNER_REFUSED",
     "STAFF_LINE_TEMPLATE",
     "STAFF_LINE_WITH_POSITION_TEMPLATE",
     "STAFF_OWNER_ONLY_REFUSED",
     "STAFF_PENDING_TITLE",
+    "STAFF_POSITION_BUTTON",
+    "STAFF_POSITION_PROMPT",
+    "STAFF_RENAME_BUTTON",
+    "STAFF_RENAME_PROMPT",
+    "STAFF_ROLE_CHANGED_TEMPLATE",
+    "STAFF_ROLE_CURRENT_TEMPLATE",
     "STAFF_SELF_DEACTIVATE_REFUSED",
+    "STAFF_SELF_ROLE_REFUSED",
     "STAFF_TITLE",
     "VENUE_CITY_PROMPT",
     "VENUE_CREATED_TEMPLATE",

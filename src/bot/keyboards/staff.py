@@ -39,6 +39,9 @@ from src.bot.callbacks import (
     InviteRevoke,
     InviteRole,
     MemberActive,
+    MemberEdit,
+    MemberField,
+    MemberSetRole,
     MemberShow,
     MenuAction,
     OpenAdmin,
@@ -198,6 +201,28 @@ def roster_keyboard(
     return submenu(*rows, back=False)
 
 
+def set_role_button(entry: RosterEntry, role: MemberRole) -> InlineKeyboardButton:
+    """One role on an employee's card; the one they hold is marked rather than removed.
+
+    Marked and not hidden, because a row that loses a button when it is chosen moves the
+    other two under the thumb — and a bartender's card and a manager's card would draw
+    different keyboards for the same three roles.
+    """
+    label = texts.role_label(role)
+    return InlineKeyboardButton(
+        text=texts.STAFF_ROLE_CURRENT_TEMPLATE.format(role=label) if role is entry.role else label,
+        callback_data=MemberSetRole(member_id=entry.member_id, role=role).pack(),
+    )
+
+
+def edit_button(entry: RosterEntry, field: MemberField, caption: str) -> InlineKeyboardButton:
+    """The two fields of a card that are typed rather than chosen (TZ 5.8)."""
+    return InlineKeyboardButton(
+        text=caption,
+        callback_data=MemberEdit(member_id=entry.member_id, field=field).pack(),
+    )
+
+
 def member_keyboard(entry: RosterEntry, *, actor: AccessContext) -> InlineKeyboardMarkup:
     """One employee's card: switch them off or back on, and return to the list.
 
@@ -206,9 +231,25 @@ def member_keyboard(entry: RosterEntry, *, actor: AccessContext) -> InlineKeyboa
     (:func:`~src.services.access.may_act_on`, which is the same rule asked as a question
     rather than repeated here).
     """
-    rows = [[active_button(entry)]] if may_act_on(actor, entry.member) else []
+    rows: list[list[InlineKeyboardButton]] = []
+    if may_act_on(actor, entry.member):
+        rows.append([active_button(entry)])
+        # TZ 2 decides which roles this actor may hand out at all; the service refuses the
+        # rest again on the server (`require_outranks_target`, the owner invariant).
+        rows.append([set_role_button(entry, role) for role in issuable_roles(actor)])
+        rows.append(
+            [
+                edit_button(entry, MemberField.FULL_NAME, texts.STAFF_RENAME_BUTTON),
+                edit_button(entry, MemberField.POSITION, texts.STAFF_POSITION_BUTTON),
+            ]
+        )
     rows.append([back_to_roster()])
     return submenu(*rows, back=False)
+
+
+def member_edit_keyboard() -> InlineKeyboardMarkup:
+    """One typed step of the card: nothing on it but the cancel of TZ 8.2."""
+    return wizard(back=False)
 
 
 def name_keyboard() -> InlineKeyboardMarkup:

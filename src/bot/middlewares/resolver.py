@@ -64,6 +64,8 @@ from src.bot.callbacks import (
     InviteRole,
     MalformedCallbackError,
     MemberActive,
+    MemberEdit,
+    MemberSetRole,
     MemberShow,
     MenuKeep,
     Nav,
@@ -397,6 +399,17 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
         subject=Subject(VenueMember, "member_id", load_member, OWN),
     ),
     MemberActive: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(VenueMember, "member_id", load_member, OWN),
+    ),
+    # TZ 2 reserves handing out `manager` and `owner` to the owner, and the service refuses
+    # anything else this rule lets through — a manager reaching for a manager, or anybody
+    # reaching for themselves. The rule is the cheap half of the check, not the whole of it.
+    MemberSetRole: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(VenueMember, "member_id", load_member, OWN),
+    ),
+    MemberEdit: Rule(
         minimum_role=MemberRole.MANAGER,
         subject=Subject(VenueMember, "member_id", load_member, OWN),
     ),

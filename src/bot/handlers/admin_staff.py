@@ -54,12 +54,15 @@ from src.bot.callbacks import (
     InviteRevoke,
     InviteRole,
     MemberActive,
+    MemberEdit,
+    MemberField,
+    MemberSetRole,
     MemberShow,
     OpenAdmin,
 )
 from src.bot.keyboards.staff import issuable_roles
 from src.bot.safe_edit import safe_edit
-from src.bot.states import InviteWizard
+from src.bot.states import InviteWizard, MemberEditing
 from src.bot.views import Screen
 from src.bot.views.staff import (
     deeplink,
@@ -68,6 +71,7 @@ from src.bot.views.staff import (
     invite_position_screen,
     invite_revoked_screen,
     invite_role_screen,
+    member_edit_screen,
     member_screen,
     roster_screen,
 )
@@ -78,7 +82,7 @@ from src.services.access import (
     SelfTargetError,
     invite_deeplink_payload,
 )
-from src.services.members import RosterEntry
+from src.services.members import LastOwnerError, MemberError, RosterEntry
 from src.services.timezones import utc_now
 
 #: Name of this router; read in a traceback and in the assembly test.
@@ -87,6 +91,9 @@ ROUTER_NAME: Final = "admin_staff"
 #: Keys of `state.get_data()`, named after the steps of `InviteWizard` that fill them.
 NAME_FIELD: Final = "full_name"
 ROLE_FIELD: Final = "role"
+
+#: Key of `state.get_data()` holding the card being edited (TZ 5.8).
+MEMBER_FIELD: Final = "member_id"
 
 
 class Roster(Protocol):
@@ -106,6 +113,16 @@ class Roster(Protocol):
     async def deactivate(self, actor: AccessContext, member_id: int) -> RosterEntry: ...
 
     async def reactivate(self, actor: AccessContext, member_id: int) -> RosterEntry: ...
+
+    async def set_role(
+        self, actor: AccessContext, member_id: int, role: MemberRole
+    ) -> RosterEntry: ...
+
+    async def rename(self, actor: AccessContext, member_id: int, full_name: str) -> RosterEntry: ...
+
+    async def set_position(
+        self, actor: AccessContext, member_id: int, position: str | None
+    ) -> RosterEntry: ...
 
 
 class StaffServices(Protocol):
@@ -253,6 +270,90 @@ async def set_member_active(
         await callback.answer(texts.STAFF_OWNER_ONLY_REFUSED, show_alert=True)
         return
     await _render(bot, callback, member_screen(entry, actor=actor))
+
+
+async def set_member_role(
+    callback: CallbackQuery,
+    bot: Bot,
+    actor: AccessContext,
+    services: StaffServices,
+    callback_payload: MemberSetRole,
+) -> None:
+    """Change somebody's role from their card (TZ 5.8, TZ 2).
+
+    One tap and no confirmation step: the choice is from three, it is visible on the card
+    afterwards, and it is undone by tapping another one. The refusals that matter — your
+    own card, somebody who outranks you, the last owner — are the service's, and each of
+    them says what it is rather than arriving as the generic apology.
+    """
+    try:
+        entry = await services.members.set_role(
+            actor, callback_payload.member_id, callback_payload.role
+        )
+    except SelfTargetError:
+        await callback.answer(texts.STAFF_SELF_ROLE_REFUSED, show_alert=True)
+        return
+    except LastOwnerError:
+        await callback.answer(texts.STAFF_LAST_OWNER_REFUSED, show_alert=True)
+        return
+    except PermissionDeniedError:
+        await callback.answer(texts.STAFF_OWNER_ONLY_REFUSED, show_alert=True)
+        return
+    await _render(bot, callback, member_screen(entry, actor=actor))
+
+
+async def start_member_edit(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+    callback_payload: MemberEdit,
+) -> None:
+    """Ask for the new name or position; the card id waits in the state (TZ 5.8)."""
+    await state.set_state(
+        MemberEditing.full_name
+        if callback_payload.field is MemberField.FULL_NAME
+        else MemberEditing.position
+    )
+    await state.update_data({MEMBER_FIELD: callback_payload.member_id})
+    await _render(bot, callback, member_edit_screen(callback_payload.field))
+
+
+async def finish_member_edit(
+    message: Message,
+    state: FSMContext,
+    actor: AccessContext,
+    services: StaffServices,
+) -> None:
+    """Save the typed line onto the card and show it (decision B8, TZ 5.8).
+
+    The membership id comes from the state and never from the message, so the line typed
+    lands on the card the manager opened and on nothing else.
+    """
+    member_id = (await state.get_data()).get(MEMBER_FIELD)
+    typed = (message.text or "").strip()
+    if not isinstance(member_id, int) or not typed:
+        await _reply(message, member_edit_screen(_field_of(await state.get_state())))
+        return
+    field = _field_of(await state.get_state())
+    try:
+        if field is MemberField.FULL_NAME:
+            entry = await services.members.rename(actor, member_id, typed)
+        else:
+            entry = await services.members.set_position(actor, member_id, typed)
+    except MemberError:
+        await _reply(message, member_edit_screen(field))
+        return
+    await state.clear()
+    await _reply(message, member_screen(entry, actor=actor))
+
+
+def _field_of(raw_state: str | None) -> MemberField:
+    """Which of the two steps a typed line answers."""
+    return (
+        MemberField.FULL_NAME
+        if raw_state == MemberEditing.full_name.state
+        else MemberField.POSITION
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -437,6 +538,12 @@ def router() -> Router:
     instance.callback_query.register(open_staff, OpenAdmin.filter(F.section == AdminSection.STAFF))
     instance.callback_query.register(show_member, MemberShow.filter())
     instance.callback_query.register(set_member_active, MemberActive.filter())
+    instance.callback_query.register(set_member_role, MemberSetRole.filter())
+    instance.callback_query.register(start_member_edit, MemberEdit.filter())
+    instance.message.register(
+        finish_member_edit,
+        StateFilter(MemberEditing.full_name, MemberEditing.position),
+    )
     instance.callback_query.register(start_invite, InviteRole.filter(), StateFilter(None))
     instance.callback_query.register(
         choose_role, InviteRole.filter(), StateFilter(InviteWizard.role)

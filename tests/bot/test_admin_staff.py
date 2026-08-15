@@ -42,33 +42,46 @@ from src.bot.callbacks import (
     InviteRevoke,
     InviteRole,
     MemberActive,
+    MemberEdit,
+    MemberField,
+    MemberSetRole,
     MemberShow,
     OpenAdmin,
     parse,
 )
 from src.bot.handlers.admin_staff import (
+    MEMBER_FIELD,
     Invites,
     StaffServices,
     choose_role,
+    finish_member_edit,
     invite_name,
     invite_position,
     open_staff,
     revoke_code,
     router,
     set_member_active,
+    set_member_role,
     show_member,
     skip_position,
     stale_invite_step,
     start_invite,
+    start_member_edit,
 )
 from src.bot.keyboards.staff import INITIAL_ROLE, issuable_roles
 from src.bot.middlewares.resolver import RULES, Refusal, resolve
 from src.bot.middlewares.services import VenueServices
-from src.bot.states import InviteWizard
+from src.bot.states import InviteWizard, MemberEditing
 from src.bot.views.staff import DEEPLINK_URL_TEMPLATE, member_screen, roster_line, roster_screen
 from src.db.models import InviteCode, MemberRole, User, Venue, VenueMember
-from src.services.access import AccessContext, AccessService, invite_deeplink_payload
-from src.services.members import RosterEntry
+from src.services.access import (
+    AccessContext,
+    AccessService,
+    PermissionDeniedError,
+    SelfTargetError,
+    invite_deeplink_payload,
+)
+from src.services.members import LastOwnerError, RosterEntry
 
 from tests.bot.test_middlewares import (
     BOT_TOKEN,
@@ -186,9 +199,17 @@ class FakeRoster:
     is no longer listed" — the two are different facts, and only the second one is true.
     """
 
-    def __init__(self, entries: Sequence[RosterEntry] = ()) -> None:
+    def __init__(
+        self,
+        entries: Sequence[RosterEntry] = (),
+        *,
+        refusal: Exception | None = None,
+    ) -> None:
         self.table = list(entries)
         self.calls: list[tuple[str, int]] = []
+        #: What the service refuses with, when a test is about the refusal rather than the
+        #: change. Reproduced and not stubbed: the screen has to name each one.
+        self.refusal = refusal
 
     async def list_roster(self, actor: AccessContext) -> tuple[RosterEntry, ...]:
         self.calls.append(("list_roster", 0))
@@ -205,6 +226,36 @@ class FakeRoster:
     async def reactivate(self, actor: AccessContext, member_id: int) -> RosterEntry:
         self.calls.append(("reactivate", member_id))
         return self._set_active(member_id, is_active=True)
+
+    async def set_role(self, actor: AccessContext, member_id: int, role: MemberRole) -> RosterEntry:
+        self.calls.append(("set_role", member_id))
+        if self.refusal is not None:
+            raise self.refusal
+        entry = self._entry(member_id)
+        entry.member.role = role
+        return entry
+
+    async def rename(self, actor: AccessContext, member_id: int, full_name: str) -> RosterEntry:
+        self.calls.append(("rename", member_id))
+        if self.refusal is not None:
+            raise self.refusal
+        entry = self._entry(member_id)
+        assert entry.user is not None
+        entry.user.full_name = full_name
+        return entry
+
+    async def set_position(
+        self, actor: AccessContext, member_id: int, position: str | None
+    ) -> RosterEntry:
+        self.calls.append(("set_position", member_id))
+        if self.refusal is not None:
+            raise self.refusal
+        entry = self._entry(member_id)
+        entry.member.position = position
+        return entry
+
+    def _entry(self, member_id: int) -> RosterEntry:
+        return next(entry for entry in self.table if entry.member_id == member_id)
 
     def _set_active(self, member_id: int, *, is_active: bool) -> RosterEntry:
         entry = next(entry for entry in self.table if entry.member_id == member_id)
@@ -276,8 +327,11 @@ def _the_real_services_satisfy_the_protocols(
     return services, access
 
 
-def staff_services(*entries: RosterEntry) -> tuple[FakeStaff, FakeRoster]:
-    roster = FakeRoster(entries)
+def staff_services(
+    *entries: RosterEntry,
+    refusal: Exception | None = None,
+) -> tuple[FakeStaff, FakeRoster]:
+    roster = FakeRoster(entries, refusal=refusal)
     return FakeStaff(roster), roster
 
 
@@ -738,8 +792,8 @@ async def test_a_manager_gets_through_to_the_section() -> None:
 def test_the_router_is_named_and_registers_the_screens() -> None:
     instance = router()
     assert instance.name == "admin_staff"
-    assert len(instance.callback_query.handlers) == 8
-    assert len(instance.message.handlers) == 2
+    assert len(instance.callback_query.handlers) == 10
+    assert len(instance.message.handlers) == 3
 
 
 # --------------------------------------------------------------------------------------
@@ -831,3 +885,158 @@ def test_a_code_issued_without_a_name_is_still_listed() -> None:
     screen = roster_screen((), [make_pending(full_name=None)], timezone=TIMEZONE)
 
     assert texts.STAFF_INVITE_NO_NAME in screen.text
+
+
+# --------------------------------------------------------------------------------------
+# The card: role, name, position (TZ 5.8)
+# --------------------------------------------------------------------------------------
+#
+# `MemberService.set_role`, `rename` and `set_position` were written, tested and reachable
+# from nowhere: the card carried two buttons, and neither of them was any of these. TZ 5.8
+# asks for «сменить роль/должность» in so many words, and decision B8 promises the manager
+# that a name can be corrected later — a promise the product could not keep.
+
+
+async def test_the_card_offers_the_roles_the_actor_may_hand_out() -> None:
+    buttons = payloads(member_screen(make_entry(7), actor=OWNER).markup)
+
+    for role in MemberRole:
+        assert MemberSetRole(member_id=7, role=role).pack() in buttons
+
+
+async def test_a_manager_is_not_offered_roles_they_cannot_grant() -> None:
+    """TZ 2: `manager` hands out `staff` and nothing above it, so it sees one role."""
+    buttons = payloads(member_screen(make_entry(7), actor=MANAGER).markup)
+
+    assert MemberSetRole(member_id=7, role=MemberRole.STAFF).pack() in buttons
+    assert MemberSetRole(member_id=7, role=MemberRole.MANAGER).pack() not in buttons
+    assert MemberSetRole(member_id=7, role=MemberRole.OWNER).pack() not in buttons
+
+
+async def test_your_own_card_offers_no_role_buttons_either() -> None:
+    """The same rule that hides the switch hides everything else that changes rights."""
+    mine = make_entry(OWNER.member_id, role=MemberRole.OWNER)
+
+    buttons = payloads(member_screen(mine, actor=OWNER).markup)
+
+    assert not any(button.startswith(MemberSetRole.__prefix__) for button in buttons)
+    assert not any(button.startswith(MemberEdit.__prefix__) for button in buttons)
+
+
+async def test_pressing_a_role_changes_it_and_redraws_the_card() -> None:
+    bot = make_named_bot()
+    services, roster = staff_services(make_entry(7, full_name="Ivan Ivanov"))
+
+    await set_member_role(
+        make_callback(MemberSetRole(member_id=7, role=MemberRole.MANAGER).pack(), bot=bot),
+        bot=bot,
+        actor=OWNER,
+        services=services,
+        callback_payload=MemberSetRole(member_id=7, role=MemberRole.MANAGER),
+    )
+
+    assert roster.calls == [("set_role", 7)]
+    assert roster.table[0].role is MemberRole.MANAGER
+    assert texts.role_label(MemberRole.MANAGER) in str(edits_of(bot)[-1].text)
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected"),
+    [
+        (SelfTargetError(7), texts.STAFF_SELF_ROLE_REFUSED),
+        (LastOwnerError(VENUE_ID, 7), texts.STAFF_LAST_OWNER_REFUSED),
+        (
+            PermissionDeniedError(MemberRole.MANAGER, MemberRole.OWNER),
+            texts.STAFF_OWNER_ONLY_REFUSED,
+        ),
+    ],
+    ids=["self", "last owner", "outranked"],
+)
+async def test_each_refusal_of_a_role_change_says_what_it_is(
+    refusal: Exception, expected: str
+) -> None:
+    """Three different reasons, three different sentences — not one generic apology.
+
+    The card that offered the button may have been drawn before the rule existed or on
+    another device, so the refusal is a normal answer and has to read like one (TZ 8.2).
+    """
+    bot = make_named_bot()
+    services, _ = staff_services(make_entry(7), refusal=refusal)
+
+    await set_member_role(
+        make_callback(MemberSetRole(member_id=7, role=MemberRole.STAFF).pack(), bot=bot),
+        bot=bot,
+        actor=OWNER,
+        services=services,
+        callback_payload=MemberSetRole(member_id=7, role=MemberRole.STAFF),
+    )
+
+    assert [answer.text for answer in session_of(bot).answers()] == [expected]
+    assert not edits_of(bot), "a refused press leaves the card exactly as it was"
+
+
+async def test_renaming_asks_then_saves_onto_the_card_that_was_open() -> None:
+    """Decision B8, finally kept. The id comes from the state, never from the message."""
+    bot = make_named_bot()
+    state = make_state()
+    services, roster = staff_services(make_entry(7, full_name="Ivan Ivanov"))
+
+    await start_member_edit(
+        make_callback(MemberEdit(member_id=7, field=MemberField.FULL_NAME).pack(), bot=bot),
+        bot=bot,
+        state=state,
+        callback_payload=MemberEdit(member_id=7, field=MemberField.FULL_NAME),
+    )
+    assert await state.get_state() == MemberEditing.full_name.state
+    assert texts.STAFF_RENAME_PROMPT in str(edits_of(bot)[-1].text)
+
+    await finish_member_edit(
+        make_message("Пётр Петров", bot=bot),
+        state=state,
+        actor=MANAGER,
+        services=services,
+    )
+
+    assert roster.calls[-1] == ("rename", 7)
+    assert roster.table[0].full_name == "Пётр Петров"
+    assert await state.get_state() is None
+
+
+async def test_the_position_step_saves_through_the_other_service_call() -> None:
+    bot = make_named_bot()
+    state = make_state()
+    services, roster = staff_services(make_entry(7))
+
+    await start_member_edit(
+        make_callback(MemberEdit(member_id=7, field=MemberField.POSITION).pack(), bot=bot),
+        bot=bot,
+        state=state,
+        callback_payload=MemberEdit(member_id=7, field=MemberField.POSITION),
+    )
+    await finish_member_edit(
+        make_message("бармен", bot=bot),
+        state=state,
+        actor=MANAGER,
+        services=services,
+    )
+
+    assert roster.calls[-1] == ("set_position", 7)
+    assert roster.table[0].position == "бармен"
+
+
+async def test_an_empty_line_asks_again_instead_of_saving_nothing() -> None:
+    bot = make_named_bot()
+    state = make_state()
+    services, roster = staff_services(make_entry(7, full_name="Ivan Ivanov"))
+    await state.set_state(MemberEditing.full_name)
+    await state.update_data({MEMBER_FIELD: 7})
+
+    await finish_member_edit(
+        make_message("   ", bot=bot),
+        state=state,
+        actor=MANAGER,
+        services=services,
+    )
+
+    assert roster.calls == []
+    assert await state.get_state() == MemberEditing.full_name.state

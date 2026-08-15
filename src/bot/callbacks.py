@@ -288,6 +288,14 @@ def registered() -> tuple[type[Callback], ...]:
 # --------------------------------------------------------------------------------------
 
 
+class MemberField(enum.StrEnum):
+    """Which typed field of an employee's card is being corrected (TZ 5.8)."""
+
+    #: Decision B8: the manager owns the full name, the employee only confirms it.
+    FULL_NAME = "n"
+    POSITION = "p"
+
+
 class MenuAction(enum.StrEnum):
     """The sections of TZ 5.2, as one vocabulary for both keyboards.
 
@@ -449,6 +457,30 @@ class MemberActive(Callback, prefix="ma"):
 
     member_id: int
     is_active: bool
+
+
+class MemberSetRole(Callback, prefix="mr"):
+    """A new role for an employee (TZ 5.8 asks for role and position to be changeable).
+
+    The role travels in the button rather than in the state, because this is a choice from
+    a closed set and not something typed — rule 1 of this module. Worst case is a two-byte
+    prefix, a member id and the longest value of :class:`MemberRole`, well inside budget.
+    """
+
+    member_id: int
+    role: MemberRole
+
+
+class MemberEdit(Callback, prefix="me"):
+    """Start typing a new name or position for an employee (decision B8, TZ 5.8).
+
+    One factory for both because what follows is the same shape — a step that waits for a
+    line of text — and the field is what the step differs by. A separate factory each would
+    be two prefixes and two rules for one screen.
+    """
+
+    member_id: int
+    field: MemberField
 
 
 class InviteRole(Callback, prefix="ir"):
@@ -702,6 +734,9 @@ __all__ = [
     "InviteRole",
     "MalformedCallbackError",
     "MemberActive",
+    "MemberEdit",
+    "MemberField",
+    "MemberSetRole",
     "MemberShow",
     "MenuAction",
     "MenuKeep",

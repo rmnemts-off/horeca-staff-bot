@@ -105,6 +105,19 @@ class InviteWizard(StatesGroup):
     position = State()
 
 
+class MemberEditing(StatesGroup):
+    """TZ 5.8: correcting the name or the position of somebody already in the venue.
+
+    Separate from :class:`InviteWizard`, which fills the same two fields *before* a person
+    exists. The steps look alike and mean different things: one writes onto a code, the
+    other onto a card that already has history hanging off it.
+    """
+
+    #: Decision B8: the manager owns the full name; this is where the promise is kept.
+    full_name = State()
+    position = State()
+
+
 class TemplateEditor(StatesGroup):
     """TZ 5.8: the checklist template editor (plan task 28, decisions B3 and B6)."""
 
@@ -178,6 +191,7 @@ WIZARDS: Final[frozenset[str]] = frozenset(
     {
         ChecklistSkip.__name__,
         InviteWizard.__name__,
+        MemberEditing.__name__,
         Onboarding.__name__,
         RecipeWizard.__name__,
         SettingsEdit.__name__,
@@ -238,6 +252,7 @@ __all__ = [
     "WIZARDS",
     "ChecklistSkip",
     "InviteWizard",
+    "MemberEditing",
     "Onboarding",
     "RecipeSearch",
     "RecipeWizard",

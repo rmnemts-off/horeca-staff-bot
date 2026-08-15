@@ -22,8 +22,10 @@ from collections.abc import Sequence
 from typing import Final
 
 from src.bot import texts
+from src.bot.callbacks import MemberField
 from src.bot.keyboards.staff import (
     code_keyboard,
+    member_edit_keyboard,
     member_keyboard,
     name_keyboard,
     position_keyboard,
@@ -125,6 +127,14 @@ def member_screen(entry: RosterEntry, *, actor: AccessContext) -> Screen:
     return Screen(text=roster_line(entry), markup=member_keyboard(entry, actor=actor))
 
 
+def member_edit_screen(field: MemberField) -> Screen:
+    """The step that asks for a new name or position on an existing card (TZ 5.8)."""
+    prompt = (
+        texts.STAFF_RENAME_PROMPT if field is MemberField.FULL_NAME else texts.STAFF_POSITION_PROMPT
+    )
+    return Screen(text=prompt, markup=member_edit_keyboard())
+
+
 def invite_name_screen() -> Screen:
     """Decision B8: the manager writes the name, the employee confirms it on activation."""
     return Screen(text=texts.INVITE_NAME_PROMPT, markup=name_keyboard())
@@ -173,6 +183,7 @@ __all__ = [
     "invite_position_screen",
     "invite_revoked_screen",
     "invite_role_screen",
+    "member_edit_screen",
     "member_screen",
     "roster_line",
     "roster_screen",
