@@ -68,7 +68,7 @@ from src.bot.handlers.admin_staff import (
     start_invite,
     start_member_edit,
 )
-from src.bot.keyboards.staff import INITIAL_ROLE, issuable_roles
+from src.bot.keyboards.staff import INITIAL_ROLE
 from src.bot.middlewares.resolver import RULES, Refusal, resolve
 from src.bot.middlewares.services import VenueServices
 from src.bot.states import InviteWizard, MemberEditing
@@ -80,6 +80,7 @@ from src.services.access import (
     PermissionDeniedError,
     SelfTargetError,
     invite_deeplink_payload,
+    issuable_roles,
 )
 from src.services.members import LastOwnerError, RosterEntry
 

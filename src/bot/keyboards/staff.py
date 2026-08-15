@@ -50,26 +50,12 @@ from src.bot.callbacks import (
 from src.bot.keyboards.checklist import fit
 from src.bot.keyboards.menu import submenu, wizard
 from src.db.models import InviteCode, MemberRole
-from src.services.access import AccessContext, may_act_on, role_rank
+from src.services.access import AccessContext, issuable_roles, may_act_on
 from src.services.members import RosterEntry
 
 #: The role «Добавить» starts a code with. TZ 2 lets every manager hand out `staff`, so this
 #: is the one role the button is pressable with whoever is looking at the roster.
 INITIAL_ROLE: Final = MemberRole.STAFF
-
-
-def issuable_roles(actor: AccessContext) -> tuple[MemberRole, ...]:
-    """Roles this actor may put on a code — the buttons of the role step (TZ 2).
-
-    A mirror of the rule inside `AccessService.issue_invite_code`: a code for `manager` or
-    `owner` needs an owner behind it. Drawing all three for a manager would be a button
-    that answers with a refusal, which TZ 8.1 forbids as loudly as a button that leads
-    nowhere. That the rule is written twice is a gap in the service layer and is reported
-    as one — `AccessService` has no "what may I hand out" of its own.
-    """
-    if actor.is_owner:
-        return tuple(MemberRole)
-    return tuple(role for role in MemberRole if role_rank(role) < role_rank(MemberRole.MANAGER))
 
 
 # --------------------------------------------------------------------------------------

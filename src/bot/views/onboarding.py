@@ -129,6 +129,20 @@ def activated(*, full_name: str, venue: str) -> Screen:
     )
 
 
+def welcomed_back(*, full_name: str, venue: str) -> Screen:
+    """The same moment for somebody whose row was here all along (TZ 5.1).
+
+    Their checklists, shifts and write-offs never went anywhere — only their access did —
+    so the greeting says «again». The keyboard is the reply one, attached by the handler,
+    exactly as in :func:`activated`.
+    """
+    return Screen(
+        text=texts.ONBOARDING_WELCOME_BACK_TEMPLATE.format(
+            full_name=quoted(full_name), venue=quoted(venue)
+        )
+    )
+
+
 def venue_choice(options: Sequence[VenueOption]) -> Screen:
     """The venues somebody works in, to pick one from (TZ 5.1).
 
@@ -164,4 +178,5 @@ __all__ = [
     "name_too_short",
     "venue_choice",
     "venue_missing",
+    "welcomed_back",
 ]

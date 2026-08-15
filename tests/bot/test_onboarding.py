@@ -103,6 +103,8 @@ class Invite:
     position: str | None = POSITION
     #: Already decided by the service in the real thing: expired, revoked, spent.
     rejection: InviteRejection | None = None
+    #: The row was here all along and has just been switched back on (TZ 5.1).
+    reinstates: bool = False
 
 
 class FakeAccess:
@@ -211,7 +213,12 @@ class FakeAccess:
             position=invite.position,
             is_active=True,
         )
-        return InviteActivation(user=user, member=member, venue_id=invite.venue_id)
+        return InviteActivation(
+            user=user,
+            member=member,
+            venue_id=invite.venue_id,
+            was_reinstated=invite.reinstates,
+        )
 
     async def venue_names(self, venue_ids: Iterable[int]) -> Mapping[int, str]:
         asked = tuple(venue_ids)
@@ -761,3 +768,28 @@ async def test_a_button_of_the_way_in_still_carries_no_venue_of_its_own() -> Non
     """They grant nothing: the code is re-read by the service, the wizard by task 26."""
     resolution = await resolve("vc", actor=None, repositories=None)
     assert resolution.refusal is not Refusal.UNREGISTERED
+
+
+async def test_a_returning_employee_is_greeted_as_one() -> None:
+    """TZ 5.1: a dismissed employee's row survives, so coming back is a return.
+
+    Their checklists, shifts and write-offs never went anywhere — only their access did.
+    Greeting somebody who worked here for a year as a newcomer reads as a system that forgot
+    them, and `was_reinstated` was computed for this screen and read by nobody until now.
+    """
+    at = stand(identity=stranger(), access=FakeAccess(invites=[Invite(reinstates=True)]))
+
+    await confirming(at, is_correct=True)
+
+    greeting = str(edits(at.bot)[-1].text)
+    assert RECORDED_NAME in greeting
+    assert greeting.startswith(texts.ONBOARDING_WELCOME_BACK_TEMPLATE.split("{")[0])
+
+
+async def test_a_newcomer_is_not_told_they_are_back() -> None:
+    at = stand(identity=stranger())
+
+    await confirming(at, is_correct=True)
+
+    greeting = str(edits(at.bot)[-1].text)
+    assert greeting.startswith(texts.ONBOARDING_DONE_TEMPLATE.split("{")[0])

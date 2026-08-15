@@ -60,7 +60,6 @@ from src.bot.callbacks import (
     MemberShow,
     OpenAdmin,
 )
-from src.bot.keyboards.staff import issuable_roles
 from src.bot.safe_edit import safe_edit
 from src.bot.states import InviteWizard, MemberEditing
 from src.bot.views import Screen
@@ -81,6 +80,7 @@ from src.services.access import (
     PermissionDeniedError,
     SelfTargetError,
     invite_deeplink_payload,
+    issuable_roles,
 )
 from src.services.members import LastOwnerError, MemberError, RosterEntry
 from src.services.timezones import utc_now

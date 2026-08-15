@@ -371,8 +371,9 @@ async def _join(
         # Unreachable while the activation above read the code through that venue's own
         # repository; the menu is what matters here, so it is not worth failing over.
         return Screen(text=texts.MENU_PROMPT), member.role
+    greeting = views.welcomed_back if activation.was_reinstated else views.activated
     return (
-        views.activated(
+        greeting(
             full_name=full_name if user is None else user.full_name,
             venue=venue,
         ),

@@ -289,19 +289,21 @@ class InvitePreview:
 class InviteActivation:
     """Outcome of typing a code. `rejection` is `None` exactly when the person is in.
 
-    `was_already_member` answers "were you working here a second ago?", which is a question
-    about *access*, not about rows. TZ 5.1 keeps the `venue_members` row of a dismissed
-    employee forever so their checklists and write-offs stay in the reports — that surviving
-    row is history, not membership. So a returning employee whose row is reactivated is a
-    return (`False`), and only somebody whose row was already active gets `True` and the
-    "you are already in" wording.
+    `was_reinstated` says the row was already there and has been switched back on: the
+    dismissed employee who came back. TZ 5.1 keeps that row forever so their checklists and
+    write-offs stay in the reports, and the person on the other side of the screen should
+    hear that they are *back* rather than be greeted as a newcomer — they know perfectly
+    well they used to work here, and the wrong greeting reads as a system that forgot.
+
+    Somebody who is working here *right now* never reaches this class at all: they are
+    turned away with `ALREADY_MEMBER` and their code is left alone.
     """
 
     rejection: InviteRejection | None = None
     user: User | None = None
     member: VenueMember | None = None
     venue_id: int | None = None
-    was_already_member: bool = False
+    was_reinstated: bool = False
 
     @property
     def is_activated(self) -> bool:
@@ -408,6 +410,19 @@ def require_outranks_target(actor: AccessContext, member: VenueMember) -> None:
     """
     if role_rank(member.role) >= role_rank(MemberRole.MANAGER):
         require_owner(actor)
+
+
+def issuable_roles(actor: AccessContext) -> tuple[MemberRole, ...]:
+    """The roles this actor may put on a code or on a card (TZ 2).
+
+    The single formulation of the rule `issue_invite_code` and `MemberService.set_role`
+    both enforce. It used to be written twice — here as a check and again in
+    `src/bot/keyboards/staff.py` as a list of buttons — and the docstring of the second copy
+    said so out loud. Two copies of a permission rule are one copy and one guess about it.
+    """
+    if actor.is_owner:
+        return tuple(MemberRole)
+    return tuple(role for role in MemberRole if role_rank(role) < role_rank(MemberRole.MANAGER))
 
 
 def may_act_on(actor: AccessContext, member: VenueMember) -> bool:
@@ -826,12 +841,12 @@ class AccessService:
                 role=found.role,
                 position=found.position,
             )
-            was_member = False
+            was_reinstated = False
         else:
             # TZ 5.1: a returning employee keeps the row that carries their history. The
             # role is the higher of the two: the code may promote a returning employee, and
             # may not quietly demote one (TZ 2).
-            was_member = False
+            was_reinstated = True
             restored = (
                 found.role if role_rank(found.role) > role_rank(existing.role) else existing.role
             )
@@ -852,7 +867,7 @@ class AccessService:
             user=user,
             member=member,
             venue_id=venue_id,
-            was_already_member=was_member,
+            was_reinstated=was_reinstated,
         )
 
     async def _record_activation(
@@ -987,6 +1002,7 @@ __all__ = [
     "as_utc",
     "format_invite_code",
     "invite_deeplink_payload",
+    "issuable_roles",
     "may_act_on",
     "new_invite_secret",
     "parse_invite_code",

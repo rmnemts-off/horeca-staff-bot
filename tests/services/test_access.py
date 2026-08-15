@@ -1253,7 +1253,7 @@ async def test_a_returning_employee_keeps_the_row_that_carries_their_history(
     )
 
     assert activation.is_activated is True
-    assert activation.was_already_member is False
+    assert activation.was_reinstated is True, "the row was here all along and came back on"
     assert len(stand.members.rows) == 1
     assert activation.member is not None
     assert activation.member.id == member.id

@@ -43,6 +43,10 @@ ONBOARDING_NAME_EDIT_BUTTON: Final = "Поправить имя"
 ONBOARDING_NAME_PROMPT: Final = "Напишите имя и фамилию — так вас увидят в графике."
 ONBOARDING_NAME_TOO_SHORT: Final = "Слишком коротко. Напишите имя и фамилию."
 ONBOARDING_DONE_TEMPLATE: Final = "Готово, {full_name}. Вы в команде «{venue}»."
+#: TZ 5.1: the row of a dismissed employee survives, so coming back is a return and not
+#: a first day. Greeting somebody who worked here for a year as a newcomer reads as a
+#: system that forgot them.
+ONBOARDING_WELCOME_BACK_TEMPLATE: Final = "С возвращением, {full_name}. Вы снова в «{venue}»."
 
 #: TZ 5.1: somebody who works in two places picks one, and it is remembered.
 ONBOARDING_PICK_VENUE: Final = "Выберите заведение."
@@ -66,5 +70,6 @@ __all__ = [
     "ONBOARDING_NAME_TOO_SHORT",
     "ONBOARDING_NO_ACCESS",
     "ONBOARDING_PICK_VENUE",
+    "ONBOARDING_WELCOME_BACK_TEMPLATE",
     "ONBOARDING_WELCOME_TEMPLATE",
 ]
