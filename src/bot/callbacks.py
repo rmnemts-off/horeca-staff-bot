@@ -324,6 +324,10 @@ class AdminSection(enum.StrEnum):
     SCHEDULE = "sc"
     CHECKLISTS = "cl"
     CATALOGUE = "tt"
+    #: TZ 5.9: the manager's report on a day of the venue.
+    REPORTS = "rp"
+    # Settings stay last: the order of this enum is the order of the board, and the block a
+    # manager opens once a month belongs under the ones they open every day.
     SETTINGS = "se"
 
 
@@ -481,6 +485,17 @@ class MemberEdit(Callback, prefix="me"):
 
     member_id: int
     field: MemberField
+
+
+class ReportDay(Callback, prefix="rd"):
+    """Which day the report is about, counted back from the venue's today (TZ 5.9).
+
+    A number of days and not a date: a date in a button would be six bytes of budget spent
+    on something the screen already knows, and "today" pressed after midnight must mean
+    the new day rather than the one the button was drawn on.
+    """
+
+    days_back: int
 
 
 class MemberRebind(Callback, prefix="mb"):
@@ -755,6 +770,7 @@ __all__ = [
     "RecipeMissing",
     "RecipePage",
     "RecipeShow",
+    "ReportDay",
     "ShiftCloser",
     "ShiftDelete",
     "ShiftMember",

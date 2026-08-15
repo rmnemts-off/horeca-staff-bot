@@ -76,6 +76,7 @@ from src.bot.callbacks import (
     RecipeMissing,
     RecipePage,
     RecipeShow,
+    ReportDay,
     ShiftCloser,
     ShiftDelete,
     ShiftMember,
@@ -414,6 +415,9 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
         minimum_role=MemberRole.MANAGER,
         subject=Subject(VenueMember, "member_id", load_member, OWN),
     ),
+    # No subject: the payload is a number of days, and what it may reach is decided by the
+    # role alone (TZ 5.9 — the manager sees the reports of their own venue).
+    ReportDay: Rule(minimum_role=MemberRole.MANAGER),
     MemberRebind: Rule(
         minimum_role=MemberRole.MANAGER,
         subject=Subject(VenueMember, "member_id", load_member, OWN),

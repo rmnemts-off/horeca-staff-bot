@@ -39,6 +39,7 @@ from src.bot.handlers import (
     admin,
     admin_checklists,
     admin_recipes,
+    admin_reports,
     admin_schedule,
     admin_staff,
     admin_venue,
@@ -67,6 +68,7 @@ def all_routers() -> tuple[Router, ...]:
         admin_checklists.router(),
         admin_schedule.router(),
         admin_recipes.router(),
+        admin_reports.router(),
     )
 
 
@@ -74,6 +76,7 @@ __all__ = [
     "admin",
     "admin_checklists",
     "admin_recipes",
+    "admin_reports",
     "admin_schedule",
     "admin_staff",
     "admin_venue",

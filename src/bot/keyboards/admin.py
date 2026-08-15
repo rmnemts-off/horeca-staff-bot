@@ -58,6 +58,7 @@ BLOCKS: Final[tuple[tuple[AdminSection, str], ...]] = (
     (AdminSection.SCHEDULE, texts.ADMIN_SCHEDULE_BUTTON),
     (AdminSection.CHECKLISTS, texts.ADMIN_CHECKLISTS_BUTTON),
     (AdminSection.CATALOGUE, texts.ADMIN_CATALOGUE_BUTTON),
+    (AdminSection.REPORTS, texts.ADMIN_REPORTS_BUTTON),
     (AdminSection.SETTINGS, texts.ADMIN_SETTINGS_BUTTON),
 )
 

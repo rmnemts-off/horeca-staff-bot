@@ -73,6 +73,7 @@ from src.services.members import MemberService
 from src.services.notifications import NotificationService
 from src.services.overdue import OverdueService
 from src.services.recipes import RecipeService
+from src.services.reports import ReportService
 from src.services.shifts import ShiftService
 from src.services.templates import TemplateService
 from src.services.venues import VenueService
@@ -133,6 +134,7 @@ class VenueServices:
     recipes: RecipeService
     shifts: ShiftService
     notifications: NotificationService
+    reports: ReportService
 
     @property
     def venue_id(self) -> int:
@@ -255,6 +257,14 @@ class Container:
                 shifts=repositories.shifts,
                 settings=repositories.settings,
                 checklists=checklists,
+            ),
+            reports=ReportService(
+                venue=venue.name,
+                shifts=repositories.shifts,
+                checklists=checklists,
+                # `users` and not the roster: TZ 5.1 keeps a dismissed employee's row, and
+                # the report of the month they worked must still say their name.
+                users=repositories.users,
             ),
             templates=TemplateService(
                 templates=repositories.templates,

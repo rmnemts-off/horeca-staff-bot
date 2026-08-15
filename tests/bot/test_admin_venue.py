@@ -356,13 +356,19 @@ def payloads_of(screen: Screen) -> list[str]:
     ]
 
 
-def test_the_board_draws_the_five_blocks_of_stage_zero() -> None:
+def test_the_board_draws_every_block_that_is_built() -> None:
+    """Six now: the reports of TZ 5.9 joined the five of stage 0.
+
+    The count is asserted against the registry rather than written out twice, so a block
+    added without a caption — or a caption added without a block — fails here instead of
+    drawing a button that leads nowhere (TZ 8.1).
+    """
     screen = views.board()
     assert screen.text == texts.ADMIN_TITLE
     blocks = [parse(payload) for payload in payloads_of(screen)]
     opened = [entry.section for entry in blocks if isinstance(entry, OpenAdmin)]
-    assert opened == list(AdminSection), "every block of TZ 5.8 that stage 0 built, in order"
-    assert len(opened) == len(keyboards.BLOCKS) == 5
+    assert opened == list(AdminSection), "every block of TZ 5.8 that is built, in order"
+    assert len(opened) == len(keyboards.BLOCKS)
 
 
 def test_the_board_sits_one_step_from_the_menu() -> None:

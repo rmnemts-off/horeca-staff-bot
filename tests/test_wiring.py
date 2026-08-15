@@ -81,6 +81,7 @@ from src.services.members import MemberRepositories, MemberService
 from src.services.notifications import NotificationService
 from src.services.overdue import OverdueService
 from src.services.recipes import RecipeService
+from src.services.reports import ReportService
 from src.services.shifts import ShiftService
 from src.services.templates import TemplateService
 from src.services.venues import VenueCreationRepositories, VenueService
@@ -287,6 +288,7 @@ class Services:
     templates: TemplateService
     recipes: RecipeService
     shifts: ShiftService
+    reports: ReportService
 
 
 def build_services(session: AsyncSession) -> Services:
@@ -357,6 +359,14 @@ def build_services(session: AsyncSession) -> Services:
             members=VenueMemberRepo(session, VENUE_ID),
             notifier=notifications,
             audit=trail,
+        ),
+        reports=ReportService(
+            venue="PIMS",
+            shifts=ShiftRepo(session, VENUE_ID),
+            checklists=checklists,
+            # `users` and not the roster: a dismissed employee keeps their row (TZ 5.1) and
+            # the report of the month they worked still has to say their name.
+            users=UserRepo(session),
         ),
     )
 

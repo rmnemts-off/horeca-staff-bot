@@ -118,6 +118,13 @@ class MemberEditing(StatesGroup):
     position = State()
 
 
+class ReportWizard(StatesGroup):
+    """TZ 5.9: the one step of the report — which day (part III of the stage 1 spec)."""
+
+    #: Waiting for a typed date; the two shortcuts are buttons and need no state of their own.
+    day = State()
+
+
 class TemplateEditor(StatesGroup):
     """TZ 5.8: the checklist template editor (plan task 28, decisions B3 and B6)."""
 
@@ -194,6 +201,7 @@ WIZARDS: Final[frozenset[str]] = frozenset(
         MemberEditing.__name__,
         Onboarding.__name__,
         RecipeWizard.__name__,
+        ReportWizard.__name__,
         SettingsEdit.__name__,
         ShiftWizard.__name__,
         TemplateEditor.__name__,
@@ -264,6 +272,7 @@ __all__ = [
     "Onboarding",
     "RecipeSearch",
     "RecipeWizard",
+    "ReportWizard",
     "SettingsEdit",
     "ShiftWizard",
     "TemplateEditor",

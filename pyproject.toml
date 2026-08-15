@@ -16,6 +16,11 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2.2",
     "apscheduler>=3.10",
+    # Runtime, not dev: the shift report of TZ 5.9 is written by the running bot, and the
+    # image is built with `pip install .` without the dev extra. Left in [dev] alone, the
+    # tests would stay green while production fell over on the first export — the quiet
+    # class of failure this project keeps writing guards against.
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
