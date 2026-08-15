@@ -44,8 +44,9 @@ from src.bot.callbacks import (
     OpenAdmin,
     OpenSection,
 )
+from src.bot.keyboards.checklist import fit
 from src.bot.keyboards.menu import submenu, wizard
-from src.db.models import MemberRole
+from src.db.models import InviteCode, MemberRole
 from src.services.access import AccessContext, may_act_on, role_rank
 from src.services.members import RosterEntry
 
@@ -158,13 +159,40 @@ def back_to_management() -> InlineKeyboardButton:
 # --------------------------------------------------------------------------------------
 
 
-def roster_keyboard(entries: Sequence[RosterEntry]) -> InlineKeyboardMarkup:
+def pending_button(code: InviteCode) -> InlineKeyboardButton:
+    """Withdraw a code that is still waiting for somebody (TZ 5.1).
+
+    The caption carries the name so that a manager with three codes out can tell them
+    apart; it is trimmed to the 20 characters of TZ 8.2, because the name is the venue's
+    own text and nothing here can bound it.
+    """
+    return InlineKeyboardButton(
+        text=fit(
+            texts.STAFF_INVITE_BUTTON_TEMPLATE.format(
+                full_name=code.full_name or texts.STAFF_INVITE_NO_NAME
+            )
+        ),
+        callback_data=InviteRevoke(code_id=code.id).pack(),
+    )
+
+
+def roster_keyboard(
+    entries: Sequence[RosterEntry],
+    pending: Sequence[InviteCode] = (),
+) -> InlineKeyboardMarkup:
     """The employees list, with `STAFF_ADD_BUTTON` under it.
 
     The empty roster gets the same keyboard minus the people: TZ 8.1 wants the empty state
     to carry the button that ends it, and it is the same button either way.
+
+    Codes nobody has used yet come after the people, one withdraw button each. They are on
+    this screen because it is the only one that outlives the moment a code is issued: the
+    screen that shows a fresh code carries the only other withdraw button there is, and
+    leaving it used to make the code permanent for seven days — invisible and unstoppable
+    even when it had been forwarded to the wrong chat.
     """
     rows: list[list[InlineKeyboardButton]] = [[member_button(entry)] for entry in entries]
+    rows.extend([pending_button(code)] for code in pending)
     rows.append([add_button()])
     rows.append([back_to_management()])
     return submenu(*rows, back=False)

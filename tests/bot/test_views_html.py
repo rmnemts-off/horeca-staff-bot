@@ -42,7 +42,7 @@ from src.bot.views import (
     shifts,
     staff,
 )
-from src.db.models import ChecklistType, MemberRole, Venue, VenueSettings
+from src.db.models import ChecklistType, InviteCode, MemberRole, Venue, VenueSettings
 from src.services.access import InviteRejection
 from src.services.notifications import NotificationType
 from src.services.shifts import ShiftRole, ShiftWarning
@@ -184,11 +184,25 @@ def test_onboarding_screens_survive_hostile_text() -> None:
         assert_telegram_html(onboarding.invite_rejected(rejection).text)
 
 
+def hostile_code() -> InviteCode:
+    """A pending invite whose name is the venue's own text, and therefore hostile."""
+    return InviteCode(
+        id=1,
+        venue_id=1,
+        code="1-A7K9QX4M",
+        role=MemberRole.STAFF,
+        full_name=HOSTILE,
+        expires_at=dt.datetime(2026, 8, 22, 9, 0, tzinfo=dt.UTC),
+    )
+
+
 def test_staff_screens_survive_hostile_text() -> None:
     """TZ 5.8: the employee list, a card, and the code screen that is HTML on purpose."""
     entry = make_entry(full_name=HOSTILE, position=HOSTILE, role=MemberRole.MANAGER)
     blocked = make_entry(2, full_name=HOSTILE, is_active=False, is_bot_blocked=True)
-    assert_telegram_html(staff.roster_screen([entry, blocked]).text)
+    assert_telegram_html(
+        staff.roster_screen([entry, blocked], [hostile_code()], timezone="Europe/Moscow").text
+    )
     assert_telegram_html(staff.member_screen(entry, actor=STAFF_ACTOR).text)
     assert_telegram_html(
         staff.invite_code_screen(

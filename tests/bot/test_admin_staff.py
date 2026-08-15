@@ -66,7 +66,7 @@ from src.bot.middlewares.resolver import RULES, Refusal, resolve
 from src.bot.middlewares.services import VenueServices
 from src.bot.states import InviteWizard
 from src.bot.views.staff import DEEPLINK_URL_TEMPLATE, member_screen, roster_line, roster_screen
-from src.db.models import InviteCode, MemberRole, User, VenueMember
+from src.db.models import InviteCode, MemberRole, User, Venue, VenueMember
 from src.services.access import AccessContext, AccessService, invite_deeplink_payload
 from src.services.members import RosterEntry
 
@@ -91,6 +91,8 @@ BOT_ID: Final = 42
 BOT_USERNAME: Final = "barpoint_staff_bot"
 CODE: Final = "1-A7K9QX4M"
 NOW: Final = dt.datetime(2026, 8, 14, 9, 0, tzinfo=dt.UTC)
+#: The venue the roster screen reads the expiry of a code in (TZ 3.4).
+TIMEZONE: Final = "Europe/Moscow"
 
 OWNER: Final = make_actor(MemberRole.OWNER, user_id=13, telegram_id=1_001)
 
@@ -129,6 +131,11 @@ def make_state() -> FSMContext:
         storage=MemoryStorage(),
         key=StorageKey(bot_id=BOT_ID, chat_id=CHAT_ID, user_id=MANAGER_TELEGRAM_ID),
     )
+
+
+def make_venue(timezone: str = TIMEZONE) -> Venue:
+    """The venue the screen reads its clock from; nothing else on it is looked at."""
+    return Venue(id=VENUE_ID, name="PIMS", city="Moscow", timezone=timezone, is_active=True)
 
 
 def make_entry(
@@ -217,11 +224,21 @@ class FakeStaff:
 class FakeInvites:
     """The invite half of `AccessService` (TZ 5.1), recorded."""
 
-    def __init__(self, *, code: InviteCode | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        code: InviteCode | None = None,
+        pending: Sequence[InviteCode] = (),
+    ) -> None:
         self.code = code if code is not None else make_code()
         self.issued: list[dict[str, Any]] = []
         self.revoked: list[int] = []
         self.known_codes = {self.code.id}
+        #: Codes nobody has used yet — what the roster screen lists under the people.
+        self.pending = list(pending)
+
+    async def list_pending_invite_codes(self, actor: AccessContext) -> Sequence[InviteCode]:
+        return tuple(self.pending)
 
     async def issue_invite_code(
         self,
@@ -302,7 +319,7 @@ def markup_of(call: EditMessageText | SendMessage) -> InlineKeyboardMarkup:
 
 
 def test_the_empty_roster_says_so_and_offers_the_button_that_ends_it() -> None:
-    screen = roster_screen(())
+    screen = roster_screen((), timezone=TIMEZONE)
     assert screen.text == f"{texts.STAFF_TITLE}\n\n{texts.STAFF_EMPTY}"
     assert texts.STAFF_ADD_BUTTON in captions(screen.markup)
 
@@ -313,7 +330,7 @@ def test_no_button_of_the_empty_roster_leads_nowhere() -> None:
     A rule in the resolver is what makes a payload reachable at all: a factory without one
     is refused before any handler sees it, so a button carrying it is decoration.
     """
-    for payload in payloads(roster_screen(()).markup):
+    for payload in payloads(roster_screen((), timezone=TIMEZONE).markup):
         assert type(parse(payload)) in RULES, payload
 
 
@@ -321,7 +338,7 @@ async def test_the_add_button_of_the_empty_roster_actually_starts_the_wizard() -
     """The empty state is only done if its one button works — pressed, and not read."""
     bot = make_named_bot()
     state = make_state()
-    empty = roster_screen(())
+    empty = roster_screen((), timezone=TIMEZONE)
     pressed = next(
         payload
         for payload, caption in zip(payloads(empty.markup), captions(empty.markup), strict=True)
@@ -386,6 +403,8 @@ async def test_the_roster_lists_everybody_with_a_button_each() -> None:
         state=make_state(),
         actor=MANAGER,
         services=services,
+        access=FakeInvites(),
+        venue=make_venue(),
     )
     screen = edits_of(bot)[-1]
     assert "Ivan Ivanov" in str(screen.text)
@@ -412,6 +431,8 @@ async def test_opening_the_section_ends_a_half_filled_wizard() -> None:
         state=state,
         actor=MANAGER,
         services=services,
+        access=FakeInvites(),
+        venue=make_venue(),
     )
     assert await state.get_state() is None
 
@@ -719,3 +740,94 @@ def test_the_router_is_named_and_registers_the_screens() -> None:
     assert instance.name == "admin_staff"
     assert len(instance.callback_query.handlers) == 8
     assert len(instance.message.handlers) == 2
+
+
+# --------------------------------------------------------------------------------------
+# Codes that are still waiting (TZ 5.1, 5.8)
+# --------------------------------------------------------------------------------------
+#
+# Issued codes used to exist on exactly one screen — the one that had just shown them. A
+# manager who pressed «Назад» could no longer see the code, and could no longer withdraw
+# it, for the seven days it stayed alive. On the live stand that turned a link forwarded to
+# the wrong person into something nobody could stop.
+
+
+def make_pending(code_id: int = 5, *, full_name: str | None = "Мария Сидорова") -> InviteCode:
+    return InviteCode(
+        id=code_id,
+        venue_id=VENUE_ID,
+        code=f"{VENUE_ID}-A7K9QX4{code_id}",
+        role=MemberRole.STAFF,
+        full_name=full_name,
+        # Late enough in the UTC day that a far-eastern venue is already on the next one —
+        # which is the whole point of `test_the_expiry_is_read_in_the_venues_own_clock`.
+        expires_at=dt.datetime(2026, 8, 22, 20, 0, tzinfo=dt.UTC),
+    )
+
+
+async def test_the_roster_shows_the_codes_nobody_has_used_yet() -> None:
+    bot = make_named_bot()
+    services, _ = staff_services(make_entry(7, full_name="Ivan Ivanov"))
+
+    await open_staff(
+        make_callback(OpenAdmin(section=AdminSection.STAFF).pack(), bot=bot),
+        bot=bot,
+        state=make_state(),
+        actor=MANAGER,
+        services=services,
+        access=FakeInvites(pending=[make_pending()]),
+        venue=make_venue(),
+    )
+
+    text = str(edits_of(bot)[-1].text)
+    assert texts.STAFF_PENDING_TITLE in text
+    assert "Мария Сидорова" in text
+
+
+async def test_every_waiting_code_can_be_withdrawn_from_the_roster() -> None:
+    """The point of the block: the withdraw button outlives the screen that issued it."""
+    bot = make_named_bot()
+    services, _ = staff_services()
+
+    await open_staff(
+        make_callback(OpenAdmin(section=AdminSection.STAFF).pack(), bot=bot),
+        bot=bot,
+        state=make_state(),
+        actor=MANAGER,
+        services=services,
+        access=FakeInvites(pending=[make_pending(5), make_pending(6)]),
+        venue=make_venue(),
+    )
+
+    buttons = payloads(edits_of(bot)[-1].reply_markup)
+    assert InviteRevoke(code_id=5).pack() in buttons
+    assert InviteRevoke(code_id=6).pack() in buttons
+
+
+def test_a_venue_with_no_waiting_codes_gets_no_heading() -> None:
+    """TZ 8.1: a heading over an empty list is noise on every new venue's first screen."""
+    screen = roster_screen((), timezone=TIMEZONE)
+
+    assert texts.STAFF_PENDING_TITLE not in screen.text
+
+
+def test_the_expiry_is_read_in_the_venues_own_clock() -> None:
+    """TZ 3.4: the column is UTC and the screen is the venue's.
+
+    22.08 20:00 UTC is already 23.08 in Kamchatka, and a manager there must not be told
+    the code dies a day early.
+    """
+    code = make_pending()
+
+    moscow = roster_screen((), [code], timezone="Europe/Moscow")
+    kamchatka = roster_screen((), [code], timezone="Asia/Kamchatka")
+
+    assert "22.08" in moscow.text
+    assert "23.08" in kamchatka.text
+
+
+def test_a_code_issued_without_a_name_is_still_listed() -> None:
+    """The name step may be skipped, and a line with an empty gap reads as a bug."""
+    screen = roster_screen((), [make_pending(full_name=None)], timezone=TIMEZONE)
+
+    assert texts.STAFF_INVITE_NO_NAME in screen.text

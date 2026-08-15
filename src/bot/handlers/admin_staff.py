@@ -40,6 +40,7 @@ this module calls it rather than anything that removes a row.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from typing import Final, Protocol
 
 from aiogram import Bot, F, Router
@@ -70,7 +71,7 @@ from src.bot.views.staff import (
     member_screen,
     roster_screen,
 )
-from src.db.models import InviteCode, MemberRole
+from src.db.models import InviteCode, MemberRole, Venue
 from src.services.access import (
     AccessContext,
     PermissionDeniedError,
@@ -139,6 +140,8 @@ class Invites(Protocol):
         now: dt.datetime,
     ) -> InviteCode | None: ...
 
+    async def list_pending_invite_codes(self, actor: AccessContext) -> Sequence[InviteCode]: ...
+
 
 # --------------------------------------------------------------------------------------
 # Delivery: one screen, edited in place (TZ 8.2)
@@ -179,15 +182,25 @@ async def open_staff(
     state: FSMContext,
     actor: AccessContext,
     services: StaffServices,
+    access: Invites,
+    venue: Venue,
 ) -> None:
-    """The employees list, empty state included (TZ 5.8, 8.1).
+    """The employees list and the codes still waiting, empty state included (TZ 5.8, 8.1).
 
     The state is dropped first: this screen is the section's board, and arriving at it from
     the code the wizard just issued — or from a menu press that interrupted it — must not
     leave a half-filled scenario waiting for the manager's next line.
     """
     await state.clear()
-    await _render(bot, callback, roster_screen(await services.members.list_roster(actor)))
+    await _render(
+        bot,
+        callback,
+        roster_screen(
+            await services.members.list_roster(actor),
+            await access.list_pending_invite_codes(actor),
+            timezone=venue.timezone,
+        ),
+    )
 
 
 async def show_member(

@@ -54,6 +54,14 @@ STAFF_SELF_DEACTIVATE_REFUSED: Final = "Себя отключить нельзя
 #: TZ 2: `manager` hands out `staff` and nothing above it, so it does not switch off what
 #: it could not create — the second road to a venue with no owner.
 STAFF_OWNER_ONLY_REFUSED: Final = "Управляющего и владельца отключает только владелец."
+#: TZ 5.8: the section where employees are added is where the codes waiting to be used
+#: belong too. Without this block an issued code was invisible and — worse —
+#: unrevokable the moment the manager left the screen that had just shown it.
+STAFF_PENDING_TITLE: Final = "Ждут активации"
+STAFF_INVITE_LINE_TEMPLATE: Final = "{full_name} · {role} · до {until}"
+#: The manager did not write a name on the code (it is optional at the name step).
+STAFF_INVITE_NO_NAME: Final = "без имени"
+STAFF_INVITE_BUTTON_TEMPLATE: Final = "Отозвать {full_name}"
 
 #: Decision B8: the manager types the full name when issuing the code.
 INVITE_NAME_PROMPT: Final = "Имя и фамилия сотрудника?"
@@ -260,9 +268,13 @@ __all__ = [
     "STAFF_DEACTIVATED_MARK",
     "STAFF_DEACTIVATE_BUTTON",
     "STAFF_EMPTY",
+    "STAFF_INVITE_BUTTON_TEMPLATE",
+    "STAFF_INVITE_LINE_TEMPLATE",
+    "STAFF_INVITE_NO_NAME",
     "STAFF_LINE_TEMPLATE",
     "STAFF_LINE_WITH_POSITION_TEMPLATE",
     "STAFF_OWNER_ONLY_REFUSED",
+    "STAFF_PENDING_TITLE",
     "STAFF_SELF_DEACTIVATE_REFUSED",
     "STAFF_TITLE",
     "VENUE_CITY_PROMPT",

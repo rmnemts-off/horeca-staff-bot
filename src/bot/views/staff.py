@@ -32,9 +32,11 @@ from src.bot.keyboards.staff import (
     roster_keyboard,
 )
 from src.bot.views import Screen, quoted
-from src.db.models import MemberRole
+from src.bot.views.shifts import format_date
+from src.db.models import InviteCode, MemberRole
 from src.services.access import AccessContext
 from src.services.members import RosterEntry
+from src.services.timezones import ensure_utc, venue_timezone
 
 #: What `STAFF_LINE_TEMPLATE` writes between the fields of a line. The marks are appended
 #: with the same one, so that a line with a mark on it still reads as one list and not as a
@@ -73,12 +75,44 @@ def roster_line(entry: RosterEntry) -> str:
     return MARK_SEPARATOR.join(parts)
 
 
-def roster_screen(entries: Sequence[RosterEntry]) -> Screen:
-    """The employees list, or the empty state that starts one (TZ 5.8, 8.1)."""
+def pending_line(code: InviteCode, *, timezone: str) -> str:
+    """One code nobody has used yet: who it is for, what it grants, when it dies.
+
+    The expiry is printed as a venue-local date (TZ 3.4 — the database keeps UTC and every
+    screen reads the venue's clock). A code lives seven days, so a day and a month are
+    the whole of what a manager needs; the name comes from the venue and is escaped.
+    """
+    until = ensure_utc(code.expires_at).astimezone(venue_timezone(timezone)).date()
+    return texts.STAFF_INVITE_LINE_TEMPLATE.format(
+        full_name=quoted(code.full_name or texts.STAFF_INVITE_NO_NAME),
+        role=texts.role_label(code.role),
+        until=format_date(until),
+    )
+
+
+def roster_screen(
+    entries: Sequence[RosterEntry],
+    pending: Sequence[InviteCode] = (),
+    *,
+    timezone: str,
+) -> Screen:
+    """The employees list, or the empty state that starts one (TZ 5.8, 8.1).
+
+    Two blocks, and the second one only when it has something in it: a heading over an
+    empty list is noise on the screen every venue sees on its first day.
+    """
     body = [roster_line(entry) for entry in entries] if entries else [texts.STAFF_EMPTY]
+    if pending:
+        body.extend(
+            [
+                "",
+                texts.STAFF_PENDING_TITLE,
+                *(pending_line(code, timezone=timezone) for code in pending),
+            ]
+        )
     return Screen(
         text="\n".join([texts.STAFF_TITLE, "", *body]),
-        markup=roster_keyboard(entries),
+        markup=roster_keyboard(entries, pending),
     )
 
 
