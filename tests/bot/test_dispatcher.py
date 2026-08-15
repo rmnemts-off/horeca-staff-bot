@@ -22,7 +22,9 @@ half carries `@pytest.mark.db`: CI has Redis, a laptop may not.
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import logging
 import uuid
 from typing import Any, Final
 
@@ -34,9 +36,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
-from aiogram.methods import SendMessage
+from aiogram.methods import GetMe, SendMessage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, Update
+from aiogram.types import User as TelegramUser
 from src.bot import handlers, routers, texts
+from src.bot.__main__ import check_inline_mode
 from src.bot.callbacks import MenuAction, MenuKeep, OpenSection, registered
 from src.bot.dispatcher import (
     FSM_KEY_PREFIX,
@@ -58,14 +62,17 @@ from src.bot.states import VenueWizard
 from src.config import settings
 
 from tests.bot.test_middlewares import (
+    BOT_TOKEN,
     CHAT_ID,
     STAFF,
     STAFF_TELEGRAM_ID,
+    RecordingSession,
     make_bot,
     make_callback,
     make_message,
     session_of,
 )
+from tests.repo_scan import REPO_ROOT
 
 MENU_CAPTION: Final = texts.MENU_SHIFT_BUTTON
 HIDDEN_CAPTION: Final = texts.MENU_WRITEOFF_BUTTON
@@ -558,3 +565,106 @@ async def test_an_edit_without_a_callback_needs_no_spinner() -> None:
     bot = make_bot()
     result = await safe_edit(bot, chat_id=CHAT_ID, message_id=7, text="new")
     assert result.outcome is EditOutcome.EDITED
+
+
+# --------------------------------------------------------------------------------------
+# Inline mode is switched on outside this repository (part IV of the stage 1 spec)
+# --------------------------------------------------------------------------------------
+
+
+class InlineAwareSession(RecordingSession):
+    """A bot whose `getMe` answers whether inline mode is on for this token."""
+
+    def __init__(self, *, supports_inline: bool) -> None:
+        super().__init__()
+        self.supports_inline = supports_inline
+
+    async def make_request(self, bot: Bot, method: Any, timeout: int | None = None) -> Any:
+        if type(method).__name__ == "GetMe":
+            self.calls.append(method)
+            return TelegramUser(
+                id=bot.id,
+                is_bot=True,
+                first_name="bot",
+                username="bot",
+                supports_inline_queries=self.supports_inline,
+            )
+        return await super().make_request(bot, method, timeout)
+
+
+def bot_that_says(*, supports_inline: bool) -> Bot:
+    return Bot(token=BOT_TOKEN, session=InlineAwareSession(supports_inline=supports_inline))
+
+
+def test_the_polling_asks_telegram_for_inline_queries() -> None:
+    """Half of requirement 4.1: a handler nobody asked for is a handler nobody calls.
+
+    `start_polling` computes `allowed_updates` from the router tree, so this is what the
+    tree answers — and `inline_query` has to be in it, or Telegram never delivers one and
+    the symptom is indistinguishable from inline mode being off at @BotFather.
+    """
+    dispatcher = build_dispatcher(storage=MemoryStorage())
+
+    assert "inline_query" in dispatcher.resolve_used_update_types()
+
+
+async def test_a_token_without_inline_mode_says_so_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other half of requirement 4.1, and the one that cost an evening.
+
+    Inline mode cannot be turned on from here: until `/setinline` is completed for this
+    token, Telegram sends no `inline_query` at all and the dropdown is simply empty — which
+    reads exactly like a search that finds nothing. `getMe` knows the answer, so the process
+    says which of the two it is instead of leaving it to be guessed.
+    """
+    bot = bot_that_says(supports_inline=False)
+
+    with caplog.at_level(logging.WARNING):
+        assert await check_inline_mode(bot) is False
+
+    assert any("setinline" in record.getMessage() for record in caplog.records), caplog.text
+
+
+async def test_a_token_with_inline_mode_says_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """A warning on every start of a correctly configured bot is a warning nobody reads."""
+    bot = bot_that_says(supports_inline=True)
+
+    with caplog.at_level(logging.WARNING):
+        assert await check_inline_mode(bot) is True
+
+    assert caplog.records == []
+
+
+async def test_a_telegram_that_will_not_answer_does_not_stop_the_bot() -> None:
+    """The check is a courtesy: the bot works without inline, so a failure is not fatal."""
+    bot = make_bot()
+    session_of(bot).fail_with["GetMe"] = TelegramBadRequest(method=GetMe(), message="nope")
+
+    assert await check_inline_mode(bot) is False
+
+
+def test_the_process_actually_makes_that_check_on_start() -> None:
+    """A diagnostic nobody calls is a diagnostic that does not exist.
+
+    Read off the source rather than by running `run()`, which would mean starting the
+    polling loop; the guard is the same shape as the other static ones of this repository
+    (`tests/test_static_repos.py`), and it fails the day the call is dropped from `run()`.
+    """
+    source = (REPO_ROOT / "src" / "bot" / "__main__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    run = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(run)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "check_inline_mode" in called, (
+        "src/bot/__main__.py::run no longer asks whether inline mode is on; the empty "
+        "dropdown of a token without /setinline goes back to being indistinguishable "
+        "from a broken search"
+    )

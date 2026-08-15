@@ -19,12 +19,40 @@ from __future__ import annotations
 
 import asyncio
 
+from aiogram import Bot
+
 from src.bot.dispatcher import build_bot, build_dispatcher, build_storage
 from src.config import settings
 from src.db.session import dispose_engine
 from src.logging import configure_logging, get_logger
 
 logger = get_logger("bot")
+
+
+async def check_inline_mode(bot: Bot) -> bool:
+    """Say so in the log when inline mode is off at @BotFather (part IV of the stage 1 spec).
+
+    Inline mode is the one feature of this bot that **cannot be turned on from the code**:
+    until `/setinline` is completed for this token, Telegram never sends an `inline_query`
+    at all. The symptom is a dropdown that stays empty, which is indistinguishable from a
+    search that finds nothing and from a handler that was never wired up — and it cost an
+    evening of looking for a bug in a search that was working the whole time.
+
+    `getMe` answers it outright, so the process says which of the two it is on every start.
+    A refusal to answer is not a reason to stay down: the bot is perfectly usable without
+    inline, so a failure here is logged and polling begins anyway.
+    """
+    try:
+        me = await bot.get_me()
+    except Exception:
+        logger.warning("could not ask Telegram whether inline mode is on", exc_info=True)
+        return False
+    if not me.supports_inline_queries:
+        logger.warning(
+            "inline mode is OFF for this token: Telegram will not send inline_query at all. "
+            "Enable it once in BotFather: /setinline, pick the bot, send the placeholder text"
+        )
+    return bool(me.supports_inline_queries)
 
 
 async def run() -> None:
@@ -43,6 +71,7 @@ async def run() -> None:
         "bot process started",
         extra={"app_env": settings.app_env, "item_count": len(settings.owner_telegram_ids)},
     )
+    await check_inline_mode(bot)
     try:
         await dispatcher.start_polling(bot)
     finally:
