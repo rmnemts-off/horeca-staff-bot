@@ -32,7 +32,14 @@ from typing import Any
 
 import pytest
 from aiogram.dispatcher.event.bases import CancelHandler, SkipHandler
-from aiogram.types import CallbackQuery, Chat, Message, TelegramObject, Update
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    InlineQuery,
+    Message,
+    TelegramObject,
+    Update,
+)
 from aiogram.types import User as TelegramUser
 from src.bot import texts
 from src.bot.middlewares.errors import (
@@ -467,6 +474,20 @@ def _message_update(
     return Update(update_id=update_id, message=message)
 
 
+def _inline_update(*, query: str = "mojito", update_id: int = 4444) -> Update:
+    """A name being typed into the input field (part IV of the stage 1 spec)."""
+    return Update(
+        update_id=update_id,
+        inline_query=InlineQuery(
+            id="iq1",
+            from_user=TelegramUser(id=STAFF_TELEGRAM_ID, is_bot=False, first_name="Ivan"),
+            query=query,
+            offset="",
+            chat_type="sender",
+        ),
+    )
+
+
 def _callback_update(*, data: str = "cl:tg:1:2", update_id: int = 4343) -> Update:
     message = Message(
         message_id=12,
@@ -518,8 +539,12 @@ def answers(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     ) -> None:
         sent.append({"kind": "callback", "text": text, "show_alert": show_alert})
 
+    async def inline_answer(self: InlineQuery, results: list[Any], **kwargs: Any) -> None:
+        sent.append({"kind": "inline", "results": results, **kwargs})
+
     monkeypatch.setattr(Message, "answer", message_answer, raising=True)
     monkeypatch.setattr(CallbackQuery, "answer", callback_answer, raising=True)
+    monkeypatch.setattr(InlineQuery, "answer", inline_answer, raising=True)
     return sent
 
 
@@ -541,6 +566,32 @@ def test_an_exception_in_a_handler_does_not_reach_the_user(
     assert answers == [{"kind": "message", "text": apology}]
     assert "Traceback" not in apology
     assert "RuntimeError" not in apology
+
+
+def test_a_failed_inline_query_is_answered_with_an_empty_personal_list(
+    logs: Captured, answers: list[dict[str, Any]], apology: str
+) -> None:
+    """The fourth road of «a refusal is an answer» (`src/bot/inline.py`).
+
+    An inline query has nowhere to put an apology, and one that is never answered leaves the
+    dropdown loading until the client gives up — the bartender's read on that is a bot that
+    hangs. Personal and uncached like every other answer, because Telegram would otherwise
+    hand this empty result to the next person who types the same word.
+    """
+    result = asyncio.run(ErrorsMiddleware()(_boom_handler(), _inline_update(), {}))
+
+    assert result is None
+    assert answers == [
+        {
+            "kind": "inline",
+            "results": [],
+            "cache_time": 0,
+            "is_personal": True,
+            "next_offset": "",
+            "button": None,
+        }
+    ]
+    assert logs.at("ERROR"), "the traceback still reaches the log"
 
 
 def test_the_traceback_goes_to_the_log_with_the_request_id(

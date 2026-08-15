@@ -44,8 +44,20 @@ from aiogram.client.session.base import BaseSession
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.methods import AnswerCallbackQuery, SendMessage, TelegramMethod
-from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    AnswerInlineQuery,
+    SendMessage,
+    TelegramMethod,
+)
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    InlineKeyboardMarkup,
+    InlineQuery,
+    Message,
+    TelegramObject,
+)
 from aiogram.types import User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.bot import texts
@@ -101,6 +113,7 @@ from src.bot.middlewares.throttling import (
     Budget,
     Limiter,
     LruDict,
+    Rate,
     ThrottlingMiddleware,
     budget_for,
 )
@@ -199,6 +212,9 @@ class RecordingSession(BaseSession):
     def answers(self) -> list[AnswerCallbackQuery]:
         return [call for call in self.calls if isinstance(call, AnswerCallbackQuery)]
 
+    def inline_answers(self) -> list[AnswerInlineQuery]:
+        return [call for call in self.calls if isinstance(call, AnswerInlineQuery)]
+
     def method_names(self) -> list[str]:
         return [type(call).__name__ for call in self.calls]
 
@@ -246,6 +262,28 @@ def make_callback(
         chat_instance="ci",
         message=make_message("screen", markup=screen_markup, bot=bot),
         data=payload,
+    )
+    return query if bot is None else query.as_(bot)
+
+
+def make_inline_query(
+    text: str = "mojito",
+    *,
+    telegram_id: int = STAFF_TELEGRAM_ID,
+    chat_type: str | None = "sender",
+    bot: Bot | None = None,
+) -> InlineQuery:
+    """A name being typed into the input field (part IV of the stage 1 spec).
+
+    `chat_type="sender"` is Telegram's word for the private chat with the person who sent
+    the query — for a bot, its own dialogue, which is the only place this bot answers one.
+    """
+    query = InlineQuery(
+        id="iq1",
+        from_user=TelegramUser(id=telegram_id, is_bot=False, first_name="X"),
+        query=text,
+        offset="",
+        chat_type=chat_type,
     )
     return query if bot is None else query.as_(bot)
 
@@ -633,6 +671,26 @@ async def test_a_stranger_pressing_a_button_is_not_told_what_it_was() -> None:
     assert [answer.text for answer in answers] == [texts.ERROR_NOT_ALLOWED]
 
 
+async def test_a_stranger_typing_an_inline_query_is_answered_with_nothing() -> None:
+    """TZ 5.1 and part IV: the refusal has to *answer*, or the client loads forever.
+
+    Empty and personal: an empty answer cached for everybody would be handed to the member
+    who types the same word a second later, and TZ 5.1 gives a stranger no hint anyway.
+    """
+    bot = make_bot()
+    handler = Handler()
+    await AuthMiddleware()(
+        handler,
+        make_inline_query(telegram_id=STRANGER_TELEGRAM_ID, bot=bot),
+        {ACCESS_KEY: FakeAccess()},
+    )
+    assert not handler.was_called
+    (answer,) = session_of(bot).inline_answers()
+    assert answer.results == []
+    assert answer.is_personal is True
+    assert answer.cache_time == 0
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -932,6 +990,21 @@ async def test_a_button_press_into_a_venue_that_is_gone_is_answered_once() -> No
     assert session_of(bot).sent_texts() == [], "a spinner is closed, not written to"
 
 
+async def test_an_inline_query_into_a_venue_that_is_gone_is_answered_too() -> None:
+    """The third road in (part IV). Silence here is a client that loads until it gives up."""
+    bot = make_bot()
+    handler = Handler()
+    container = StubContainer([make_venue(is_active=False)])
+    data = context_for(known(make_user(), STAFF), container=container)
+
+    await VenueContextMiddleware()(handler, make_inline_query(bot=bot), data)
+
+    assert not handler.was_called
+    (answer,) = session_of(bot).inline_answers()
+    assert answer.results == []
+    assert answer.is_personal is True
+
+
 # --------------------------------------------------------------------------------------
 # last_seen_at
 # --------------------------------------------------------------------------------------
@@ -1036,6 +1109,61 @@ def test_two_users_do_not_share_a_bucket() -> None:
 def test_a_button_is_charged_to_the_tap_budget_and_a_message_to_commands() -> None:
     assert budget_for(make_callback(Nav(target=NavTarget.HOME).pack())) is Budget.TAPS
     assert budget_for(make_message("/start")) is Budget.COMMANDS
+    assert budget_for(make_inline_query()) is Budget.INLINE
+
+
+def test_a_word_typed_letter_by_letter_is_never_refused() -> None:
+    """Part IV: an inline query arrives per keystroke, and a frozen list reads as a dead bot.
+
+    Ten letters at a fifth of a second each — faster than anybody spells a name they are
+    reading off their own keyboard — and not one of them is refused.
+    """
+    ticker = Ticker()
+    limiter = Limiter(clock=ticker)
+    refused = 0
+    for _ in range(10):
+        if not limiter.allow(Budget.INLINE, STAFF_TELEGRAM_ID):
+            refused += 1
+        ticker.advance(0.2)
+    assert refused == 0
+
+
+def test_the_same_typing_would_be_refused_on_the_command_budget() -> None:
+    """The teeth of the third budget: without it the list dies in the middle of a word."""
+    ticker = Ticker()
+    limiter = Limiter(clock=ticker)
+    refused = 0
+    for _ in range(10):
+        if not limiter.allow(Budget.COMMANDS, STAFF_TELEGRAM_ID):
+            refused += 1
+        ticker.advance(0.2)
+    assert refused > 0
+
+
+def test_a_partial_set_of_rates_still_answers_every_budget() -> None:
+    """A caller overrides the budget it is testing; the others must still have a rate.
+
+    Without the merge in `Limiter.__init__` this raises `KeyError` inside the middleware
+    whose whole purpose is to refuse cheaply.
+    """
+    limiter = Limiter(rates={Budget.COMMANDS: Rate(per_second=1.0, burst=1)}, clock=Ticker())
+
+    assert limiter.allow(Budget.INLINE, STAFF_TELEGRAM_ID)
+    assert limiter.allow(Budget.TAPS, STAFF_TELEGRAM_ID)
+
+
+async def test_a_refused_inline_query_is_always_answered() -> None:
+    """An unanswered inline query loads on the client until it gives up (TZ 9)."""
+    bot = make_bot()
+    ticker = Ticker()
+    middleware = ThrottlingMiddleware(limiter=Limiter(clock=ticker), clock=ticker)
+    handler = Handler()
+    for _ in range(16):
+        await middleware(handler, make_inline_query(bot=bot), {})
+    assert len(handler.calls) == 15
+    (answer,) = session_of(bot).inline_answers()
+    assert answer.results == []
+    assert answer.is_personal is True
 
 
 async def test_a_refused_button_is_always_answered() -> None:

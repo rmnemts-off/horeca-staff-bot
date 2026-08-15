@@ -54,6 +54,7 @@ from typing import Any, Final
 from aiogram.filters.callback_data import MAX_CALLBACK_LENGTH, CallbackData
 
 from src.db.models import MemberRole
+from src.services.recipes import RecipeField
 
 # --------------------------------------------------------------------------------------
 # The budget
@@ -450,6 +451,81 @@ class RecipeMissing(Callback, prefix="rm"):
     """Report that a recipe is missing (TZ 5.5). What was searched for is in the state."""
 
 
+class RecipeManage(Callback, prefix="rc"):
+    """One card in the *manager's* half of the catalogue (TZ 5.8).
+
+    Not :class:`RecipeShow`, and the difference is the screen rather than the row. That one
+    opens the card a bartender reads and is pressed by everybody; this one opens the card
+    with the edit and delete buttons on it, so its rule needs the manager's role — and needs
+    the row to be the venue's own, where `RecipeShow` also serves the shared library.
+    """
+
+    recipe_id: int
+
+
+class RecipeEdit(Callback, prefix="re"):
+    """Retype one field of a card (TZ 5.8), the way :class:`MemberEdit` retypes a name.
+
+    One factory for all eight fields rather than eight: what follows every one of them is
+    the same step — a screen that waits for a line of text — and the field is what it
+    differs by. :class:`~src.services.recipes.RecipeField` is that field, and it is the
+    service's own vocabulary rather than a second one declared here, so the handler hands
+    over what it was given instead of translating between two enums that drift.
+
+    `is_clear` is the same press with no line of text behind it: take this field off the
+    card. It is a button and not an instruction to send an empty message, because Telegram
+    does not let anybody send one — a screen that asked for it would be asking for something
+    the client refuses.
+    """
+
+    recipe_id: int
+    field: RecipeField
+    #: `True` empties the field outright; `False` asks for the new value.
+    is_clear: bool = False
+
+
+class RecipeDrop(Callback, prefix="rx"):
+    """Delete a card: the question, and the answer to it (TZ 5.8).
+
+    One factory with a flag, the shape :class:`MemberActive` has. A deletion is not
+    reversible — nothing in the schema keeps a removed recipe — so it is asked about first,
+    and both presses name the same row, which is what makes the confirmation a screen about
+    *this* card rather than about whatever the state last remembered.
+    """
+
+    recipe_id: int
+    #: `False` draws the question, `True` is the answer to it.
+    is_confirmed: bool
+
+
+class CatalogueCategory(Callback, prefix="ck"):
+    """A category of the *manager's* listing, by its place on the page (TZ 5.8).
+
+    Its own factory rather than :class:`RecipeCategory`, and the reason is a wrong-screen
+    failure rather than tidiness. Both are an index into the page held in the FSM state, and
+    the recipe form draws its category step from the same list — so while that step is open,
+    a press on a section screen left further up the chat would arrive as *the answer to the
+    form's question*: the manager reaches for "show me the coffees" and sets the category of
+    the card they are entering. Two factories cannot be confused for one another, which is
+    the whole of rule 3 in this module's docstring applied one level up.
+    """
+
+    index: int
+
+
+class CataloguePage(Callback, prefix="cp"):
+    """Pagination of the manager's listing (TZ 5.5, 5.8).
+
+    Its own factory rather than :class:`RecipePage`, which the bartender's search already
+    owns: that one is registered without a state filter in a router included *before* this
+    section, so a page button shared between the two would open the employee's screen from
+    inside the management section. What is being paged through — a query or a category —
+    lives in the FSM state, for the reason rule 2 of this module gives.
+    """
+
+    offset: int
+
+
 class MemberShow(Callback, prefix="ms"):
     """One employee's card in the staff list (TZ 5.8)."""
 
@@ -736,6 +812,8 @@ __all__ = [
     "CallbackBudgetError",
     "CallbackError",
     "CallbackFieldTypeError",
+    "CatalogueCategory",
+    "CataloguePage",
     "ChecklistFinish",
     "ChecklistGroup",
     "ChecklistShow",
@@ -767,6 +845,9 @@ __all__ = [
     "OpenAdmin",
     "OpenSection",
     "RecipeCategory",
+    "RecipeDrop",
+    "RecipeEdit",
+    "RecipeManage",
     "RecipeMissing",
     "RecipePage",
     "RecipeShow",

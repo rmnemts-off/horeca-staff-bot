@@ -48,6 +48,8 @@ from src.bot.callbacks import (
     AdminCommand,
     Callback,
     CallbackError,
+    CatalogueCategory,
+    CataloguePage,
     ChecklistFinish,
     ChecklistGroup,
     ChecklistShow,
@@ -73,6 +75,9 @@ from src.bot.callbacks import (
     OpenAdmin,
     OpenSection,
     RecipeCategory,
+    RecipeDrop,
+    RecipeEdit,
+    RecipeManage,
     RecipeMissing,
     RecipePage,
     RecipeShow,
@@ -395,6 +400,30 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
     RecipeShow: Rule(subject=Subject(Recipe, "recipe_id", load_recipe, LIBRARY)),
     RecipePage: Rule(),
     RecipeMissing: Rule(),
+    # -- the manager's half of the catalogue (TZ 5.8). `OWN` and not `LIBRARY`, and that is
+    # the whole difference from `RecipeShow` above: every one of these screens ends in a
+    # write, and a row of the shared BarPoint library is read-only until question C4 is
+    # answered. The service refuses one too (`RecipeReadOnlyError`); this refuses it a
+    # screen earlier, so the manager is never offered an edit that cannot happen.
+    RecipeManage: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(Recipe, "recipe_id", load_recipe, OWN),
+    ),
+    RecipeEdit: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(Recipe, "recipe_id", load_recipe, OWN),
+    ),
+    RecipeDrop: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(Recipe, "recipe_id", load_recipe, OWN),
+    ),
+    # An offset into a listing whose query lives in the FSM state, so there is no row to
+    # fetch and the role is the whole of the check (the same shape as `ReportDay`).
+    CataloguePage: Rule(minimum_role=MemberRole.MANAGER),
+    CatalogueCategory: Rule(
+        minimum_role=MemberRole.MANAGER,
+        note="an index into the page of categories held in the FSM state, not a row",
+    ),
     # -- the roster (TZ 5.8) -----------------------------------------------------------
     MemberShow: Rule(
         minimum_role=MemberRole.MANAGER,

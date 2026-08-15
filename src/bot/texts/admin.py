@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Final
 
 from src.db.models import MemberRole
+from src.services.recipes import RecipeField
 
 # --------------------------------------------------------------------------------------
 # The section (TZ 5.8)
@@ -179,6 +180,37 @@ CARD_SAVED: Final = "Сохранил. Уже видно всей смене."
 #: names what is already there and the screen offers to open it.
 CARD_EXISTS_TEMPLATE: Final = "«{name}» в категории «{category}» уже есть."
 
+# -- correcting a card that already exists (TZ 5.8) -------------------------------------
+
+#: The section invites a search as well as a new card: a venue with two hundred cards is
+#: not browsed, and the name is the one thing a manager always knows.
+CARD_FIND_PROMPT: Final = "Напишите название — найду карточку."
+#: The eight fields, as captions of the buttons that retype them and as the name of the
+#: field in the prompt below. One string for both, because they are the same word.
+CARD_NAME_BUTTON: Final = "Название"
+CARD_GROUP_BUTTON: Final = "Категория"
+CARD_GLASSWARE_BUTTON: Final = "Бокал"
+CARD_METHOD_BUTTON: Final = "Метод"
+CARD_ICE_BUTTON: Final = "Лёд"
+CARD_COMPOSITION_BUTTON: Final = "Состав"
+CARD_GARNISH_BUTTON: Final = "Гарниш"
+CARD_INSTRUCTION_BUTTON: Final = "Приготовление"
+CARD_EDIT_PROMPT_TEMPLATE: Final = "{field}: напишите новое значение."
+#: Offered only where it is true: the name and the category cannot be taken away, they are
+#: the key of decision D6. A button and not "send an empty message", because Telegram does
+#: not let anybody send one.
+CARD_CLEAR_BUTTON: Final = "Стереть поле"
+CARD_UPDATED: Final = "Готово. Уже видно всей смене."
+#: TZ 3.3: the shared BarPoint library is read by every venue and edited by none of them
+#: (question C4). Unreachable through the buttons — the resolver refuses a library row a
+#: screen earlier — and kept because a refusal without wording is a traceback.
+CARD_READ_ONLY: Final = "Это карта общей библиотеки, её нельзя менять."
+CARD_DELETE_BUTTON: Final = "🗑 Удалить"
+#: Asked before, because there is no after: nothing in the schema keeps a removed card.
+CARD_DELETE_CONFIRM_TEMPLATE: Final = "Удалить «{name}»? Вернуть будет нельзя."
+CARD_DELETE_YES_BUTTON: Final = "Да, удалить"
+CARD_DELETED_TEMPLATE: Final = "Удалил «{name}»."
+
 # --------------------------------------------------------------------------------------
 # Venue: the wizard and the settings (TZ 5.8; plan tasks 26 and 30)
 # --------------------------------------------------------------------------------------
@@ -218,6 +250,27 @@ def role_label(role: MemberRole) -> str:
     return _ROLE_LABELS[role]
 
 
+#: The eight editable fields of a card, as words. The same arrangement as the roles above
+#: and the units in `recipes.py`: a mapping from a code-side enum
+#: (:class:`~src.services.recipes.RecipeField`) to constants declared above it, holding
+#: references and never phrases of its own.
+_FIELD_LABELS: Final[Mapping[RecipeField, str]] = {
+    RecipeField.NAME: CARD_NAME_BUTTON,
+    RecipeField.CATEGORY: CARD_GROUP_BUTTON,
+    RecipeField.GLASSWARE: CARD_GLASSWARE_BUTTON,
+    RecipeField.METHOD: CARD_METHOD_BUTTON,
+    RecipeField.ICE: CARD_ICE_BUTTON,
+    RecipeField.COMPOSITION: CARD_COMPOSITION_BUTTON,
+    RecipeField.GARNISH: CARD_GARNISH_BUTTON,
+    RecipeField.INSTRUCTION: CARD_INSTRUCTION_BUTTON,
+}
+
+
+def field_label(field: RecipeField) -> str:
+    """How a field of a card is named on a button and in the prompt that follows it."""
+    return _FIELD_LABELS[field]
+
+
 __all__ = [
     "ADMIN_CATALOGUE_BUTTON",
     "ADMIN_CHECKLISTS_BUTTON",
@@ -226,19 +279,36 @@ __all__ = [
     "ADMIN_STAFF_BUTTON",
     "ADMIN_TITLE",
     "CARD_ADD_BUTTON",
+    "CARD_CLEAR_BUTTON",
+    "CARD_COMPOSITION_BUTTON",
     "CARD_COMPOSITION_PROMPT",
+    "CARD_DELETED_TEMPLATE",
+    "CARD_DELETE_BUTTON",
+    "CARD_DELETE_CONFIRM_TEMPLATE",
+    "CARD_DELETE_YES_BUTTON",
     "CARD_EDITOR_EMPTY",
     "CARD_EDITOR_GROUPS_TEMPLATE",
     "CARD_EDITOR_TITLE",
+    "CARD_EDIT_PROMPT_TEMPLATE",
     "CARD_EXISTS_TEMPLATE",
+    "CARD_FIND_PROMPT",
+    "CARD_GARNISH_BUTTON",
     "CARD_GARNISH_PROMPT",
+    "CARD_GLASSWARE_BUTTON",
     "CARD_GLASSWARE_PROMPT",
+    "CARD_GROUP_BUTTON",
     "CARD_GROUP_PROMPT",
+    "CARD_ICE_BUTTON",
     "CARD_ICE_PROMPT",
+    "CARD_INSTRUCTION_BUTTON",
     "CARD_INSTRUCTION_PROMPT",
+    "CARD_METHOD_BUTTON",
     "CARD_METHOD_PROMPT",
+    "CARD_NAME_BUTTON",
     "CARD_NAME_PROMPT",
+    "CARD_READ_ONLY",
     "CARD_SAVED",
+    "CARD_UPDATED",
     "EDITOR_ADD_BUTTON",
     "EDITOR_ADD_TO_NEW_GROUP_BUTTON",
     "EDITOR_BULK_PROMPT",
@@ -317,5 +387,6 @@ __all__ = [
     "VENUE_TIMEZONE_PROMPT",
     "VENUE_WINDOW_PROMPT",
     "VENUE_WIZARD_TITLE",
+    "field_label",
     "role_label",
 ]

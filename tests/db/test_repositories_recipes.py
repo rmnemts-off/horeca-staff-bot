@@ -169,3 +169,101 @@ async def test_a_recipe_of_another_venue_is_not_editable(session: AsyncSession) 
 
     created = await foreign.create(name="Own recipe", category="c")
     assert created.venue_id == stranger.id, "a repository writes into its own venue only"
+
+
+@pytest.mark.db
+async def test_the_key_of_a_switched_off_card_is_still_taken(session: AsyncSession) -> None:
+    """Decision D6 through `find_by_key`: the unique index does not look at `is_active`.
+
+    This is the whole reason the duplicate check does not go through a listing any more.
+    `list_by_category` filters on `is_active`, the index does not, and a name re-entered
+    after a card was switched off used to pass the check and die on the constraint.
+    """
+    venue = await create_venue(session)
+    stranger = await create_venue(session)
+    put_away = await create_recipe(
+        session, venue, name="Мохито", category="cocktails", is_active=False
+    )
+    await create_recipe(session, stranger, name="Мохито", category="cocktails")
+    await create_recipe(session, None, name="Мохито", category="cocktails")
+
+    repo = RecipeRepo(session, venue.id)
+
+    listed = await repo.list_by_category("cocktails", limit=10, offset=0)
+    assert put_away.id not in {row.id for row in listed}, "no listing shows it"
+    found = await repo.find_by_key(name="  мохито ", category="COCKTAILS")
+    assert found is not None
+    assert found.id == put_away.id, "the switched-off card still holds its key"
+
+
+@pytest.mark.db
+async def test_neither_the_library_nor_the_neighbour_occupies_the_key(
+    session: AsyncSession,
+) -> None:
+    """`find_by_key` is `for_venue()`: a shared row is not a collision, a foreign one is not
+    visible at all (TZ 3.3, acceptance 11.3)."""
+    venue = await create_venue(session)
+    stranger = await create_venue(session)
+    await create_recipe(session, stranger, name="Негрони", category="cocktails")
+    await create_recipe(session, None, name="Негрони", category="cocktails")
+
+    repo = RecipeRepo(session, venue.id)
+
+    assert await repo.find_by_key(name="Негрони", category="cocktails") is None
+
+
+@pytest.mark.db
+async def test_deleting_a_card_takes_its_ingredients_with_it(session: AsyncSession) -> None:
+    """`ON DELETE CASCADE` on `recipe_ingredients.recipe_id` (TZ 4.6)."""
+    venue = await create_venue(session)
+    recipe = await create_recipe(session, venue, name="Sour to drop")
+    kept = await create_recipe(session, venue, name="Sour to keep")
+    ingredients = RecipeIngredientRepo(session, venue.id)
+    await ingredients.replace_all(recipe.id, [{"name": "gone"}])
+    await ingredients.replace_all(kept.id, [{"name": "stays"}])
+
+    repo = RecipeRepo(session, venue.id)
+    assert await repo.delete(recipe.id) is True
+
+    assert await repo.get(recipe.id) is None
+    assert await ingredients.list_for_recipe(recipe.id) == []
+    assert [row.name for row in await ingredients.list_for_recipe(kept.id)] == ["stays"]
+
+
+@pytest.mark.db
+async def test_a_card_of_another_venue_or_of_the_library_is_not_deletable(
+    session: AsyncSession,
+) -> None:
+    """The venue predicate is what makes a forged id harmless (TZ 9, acceptance 11.3)."""
+    venue = await create_venue(session)
+    stranger = await create_venue(session)
+    foreign = await create_recipe(session, stranger, name="Foreign to keep")
+    shared = await create_recipe(session, None, name="Shared to keep")
+
+    repo = RecipeRepo(session, venue.id)
+
+    assert await repo.delete(foreign.id) is False
+    assert await repo.delete(shared.id) is False
+    assert await RecipeRepo(session, stranger.id).get(foreign.id) is not None
+    assert await repo.get(shared.id) is not None
+
+
+@pytest.mark.db
+async def test_the_compositions_of_a_page_are_read_in_one_query(session: AsyncSession) -> None:
+    """The bulk read of the inline answer, with the join still doing the scoping."""
+    venue = await create_venue(session)
+    stranger = await create_venue(session)
+    first = await create_recipe(session, venue, name="Bulk one")
+    second = await create_recipe(session, venue, name="Bulk two")
+    shared = await create_recipe(session, None, name="Bulk shared")
+    foreign = await create_recipe(session, stranger, name="Bulk foreign")
+
+    ingredients = RecipeIngredientRepo(session, venue.id)
+    await ingredients.replace_all(first.id, [{"name": "one-a"}, {"name": "one-b"}])
+    await ingredients.replace_all(second.id, [{"name": "two-a"}])
+    await RecipeIngredientRepo(session, stranger.id).replace_all(foreign.id, [{"name": "theirs"}])
+
+    rows = await ingredients.list_for_recipes([first.id, second.id, shared.id, foreign.id])
+
+    assert [row.name for row in rows] == ["one-a", "one-b", "two-a"]
+    assert await ingredients.list_for_recipes([]) == []

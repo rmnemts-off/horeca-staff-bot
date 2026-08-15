@@ -27,7 +27,10 @@ from src.services.recipes import (
     MissingRecipeAlert,
     RecipeDraft,
     RecipeExistsError,
+    RecipeField,
     RecipeIncompleteError,
+    RecipeNotFoundError,
+    RecipeReadOnlyError,
     RecipeService,
     classify_amount,
     parse_ingredients,
@@ -238,8 +241,65 @@ class FakeRecipes:
     def _next_id(self) -> int:
         return max((row.id for row in self.recipes), default=0) + 1
 
+    async def find_by_key(self, *, name: str, category: str) -> Recipe | None:
+        """`RecipeRepo.find_by_key`: `for_venue()`, and blind to `is_active`.
+
+        Both halves are the real one's and both are load-bearing. The scope is `for_venue()`
+        and not `library()` — a shared row is not a collision, which is what makes the
+        overlay of decision D6 reachable at all — and `is_active` is not looked at, because
+        the unique index does not look at it either.
+        """
+        key = (name.strip().casefold(), category.strip().casefold())
+        return next(
+            (
+                row
+                for row in self.recipes
+                if row.venue_id == self.venue_id
+                and (row.name.strip().casefold(), row.category.strip().casefold()) == key
+            ),
+            None,
+        )
+
     async def update(self, recipe_id: int, **fields: Any) -> Recipe | None:
-        raise NotImplementedError
+        """`RecipeRepo.update`: `for_venue()`, so a library row is read-only (question C4).
+
+        The refusal is not `get()`'s: a row of the shared library is readable and not
+        writable, so `get` finds it and this answers `None`.
+        """
+        columns = Recipe.__table__.c
+        writable = {
+            name: value
+            for name, value in fields.items()
+            if name in columns and name not in PROTECTED_COLUMNS
+        }
+        row = self._own(recipe_id)
+        if row is None:
+            return None
+        for name, value in writable.items():
+            setattr(row, name, value)
+        return row
+
+    async def delete(self, recipe_id: int) -> bool:
+        """`RecipeRepo.delete`: `for_venue()`, and the composition goes with the card.
+
+        The cascade is the schema's (`recipe_ingredients.recipe_id ON DELETE CASCADE`), so
+        the fake performs it too: one that left orphans behind would promise *less* than the
+        database and hide the day a service starts relying on them being gone.
+        """
+        row = self._own(recipe_id)
+        if row is None:
+            return False
+        self.recipes.remove(row)
+        children = self._ingredients.ingredients
+        children[:] = [child for child in children if child.recipe_id != recipe_id]
+        return True
+
+    def _own(self, recipe_id: int) -> Recipe | None:
+        """`for_venue()`: this venue's row, never the library's and never the neighbour's."""
+        return next(
+            (row for row in self.recipes if row.id == recipe_id and row.venue_id == self.venue_id),
+            None,
+        )
 
 
 class FakeIngredients:
@@ -264,6 +324,9 @@ class FakeIngredients:
         #: and not the storage, so another venue's repository may adopt the same list.
         self.ingredients: list[RecipeIngredient] = list(ingredients) if table is None else table
         self.venue_id = venue_id
+        #: Every call to `list_for_recipes`, so a test can assert that a page of ten cards
+        #: costs one read and not ten (part IV of the stage 1 spec).
+        self.bulk_reads: list[list[int]] = []
         #: The recipes table this child hangs off. `FakeRecipes` owns the list and hands it
         #: over, so a recipe written after this fake was built is joinable here too.
         self._recipes: list[Recipe] = []
@@ -295,6 +358,18 @@ class FakeIngredients:
         if self._parent(recipe_id) is None:
             return []
         rows = [row for row in self.ingredients if row.recipe_id == recipe_id]
+        return list(reversed(rows))
+
+    async def list_for_recipes(self, recipe_ids: Sequence[int]) -> Sequence[RecipeIngredient]:
+        """The same join as :meth:`list_for_recipe`, over several parents at once.
+
+        The venue predicate is per row and not per call: an id of another venue among the
+        ids contributes nothing, exactly as the join in the real query does — a bulk read
+        that trusted the caller's list would be the leak the join exists to prevent.
+        """
+        self.bulk_reads.append(list(recipe_ids))
+        wanted = [row_id for row_id in recipe_ids if self._parent(row_id) is not None]
+        rows = [row for row in self.ingredients if row.recipe_id in wanted]
         return list(reversed(rows))
 
     def _own_parent(self, recipe_id: int) -> Recipe | None:
@@ -1245,3 +1320,444 @@ async def test_a_category_is_offered_only_after_a_recipe_has_used_it() -> None:
     )
 
     assert await harness.service.categories() == (COFFEE,)
+
+
+# --------------------------------------------------------------------------------------
+# Whole cards for the inline answer (part IV of the stage 1 spec)
+# --------------------------------------------------------------------------------------
+
+
+async def test_the_inline_page_carries_whole_cards() -> None:
+    """The dropdown row is a name; what it sends is the card, so both are read at once."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito", glassware="highball")],
+        ingredients=[make_ingredient(1, 1, name="White rum", qty=Decimal("50"), unit=Unit.ML)],
+    )
+
+    page = await harness.service.search_cards("mojito")
+
+    (card,) = page.cards
+    assert card.name == "Mojito"
+    assert card.glassware == "highball"
+    assert [line.name for line in card.ingredients] == ["White rum"]
+
+
+async def test_a_page_of_cards_costs_one_read_of_the_compositions() -> None:
+    """Ten round trips per keystroke is the difference between keeping up and lagging."""
+    harness = Harness(recipes=many(10))
+
+    page = await harness.service.search_cards("mojito")
+
+    assert len(page.cards) == MAX_SEARCH_RESULTS
+    assert harness.ingredients.bulk_reads == [[card.recipe_id for card in page.cards]]
+
+
+async def test_a_blank_inline_query_reaches_no_repository() -> None:
+    """TZ 5.5 rules out dumping the table, and an empty input is not a search for it."""
+    harness = Harness(recipes=many(3))
+
+    page = await harness.service.search_cards("   ")
+
+    assert page.is_empty
+    assert page.query == ""
+    assert page.next_offset is None
+    assert harness.recipes.queries == []
+    assert harness.ingredients.bulk_reads == []
+
+
+async def test_the_inline_page_says_where_the_next_one_starts() -> None:
+    """Telegram asks for more as the list is scrolled, and `offset` is how it asks."""
+    harness = Harness(recipes=many(25))
+
+    first = await harness.service.search_cards("mojito")
+    second = await harness.service.search_cards("mojito", offset=first.limit)
+
+    assert first.has_next is True
+    assert first.next_offset == MAX_SEARCH_RESULTS
+    assert len(second.cards) == MAX_SEARCH_RESULTS
+    assert {card.recipe_id for card in first.cards} & {card.recipe_id for card in second.cards} == (
+        set()
+    )
+
+
+async def test_a_card_of_another_venue_is_not_in_the_inline_page() -> None:
+    """TZ 3.3, acceptance 11.3: the rows share a table and the scope is the predicate.
+
+    Verified by mutation: dropping `row.venue_id == self.venue_id` from `FakeRecipes._visible`
+    makes this test fail on the first assertion.
+    """
+    harness = Harness(
+        recipes=[
+            make_recipe(1, name="Mojito"),
+            make_recipe(2, name="Mojito", venue_id=OTHER_VENUE_ID),
+        ],
+        ingredients=[make_ingredient(1, 2, name="foreign_rum")],
+    )
+
+    page = await harness.service.search_cards("mojito")
+
+    assert [card.recipe_id for card in page.cards] == [1]
+    assert page.cards[0].ingredients == ()
+
+
+# --------------------------------------------------------------------------------------
+# Correcting a card (TZ 5.8)
+# --------------------------------------------------------------------------------------
+
+
+async def test_a_field_is_corrected_in_place() -> None:
+    """A typo in a name is fixed, not worked around with a second card (decision D6)."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojjito")])
+
+    card = await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mojito")
+
+    assert card.recipe_id == 1
+    assert card.name == "Mojito"
+    assert [row.name for row in harness.recipes.recipes] == ["Mojito"]
+
+
+async def test_an_optional_field_is_cleared_by_an_empty_answer() -> None:
+    """TZ 5.5 draws a card without a glassware; taking one away must be possible too."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito", glassware="highball")])
+
+    card = await harness.service.update(MANAGER, 1, RecipeField.GLASSWARE, "   ")
+
+    assert card.glassware is None
+
+
+async def test_a_name_cannot_be_blanked() -> None:
+    """Half the key of decision D6: a card with no name is a row no listing can caption."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+
+    with pytest.raises(RecipeIncompleteError):
+        await harness.service.update(MANAGER, 1, RecipeField.NAME, "")
+
+    assert harness.recipes.recipes[0].name == "Mojito"
+
+
+async def test_renaming_onto_another_card_is_refused() -> None:
+    """Decision D6, before the write: an index violation is not a message a manager reads."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito"), make_recipe(2, name="Daiquiri")],
+    )
+
+    with pytest.raises(RecipeExistsError) as refusal:
+        await harness.service.update(MANAGER, 2, RecipeField.NAME, "mojito")
+
+    assert refusal.value.recipe_id == 1
+    assert harness.recipes.recipes[1].name == "Daiquiri"
+
+
+async def test_a_card_is_not_its_own_twin() -> None:
+    """Changing the spelling of a name is a change, not a duplicate."""
+    harness = Harness(recipes=[make_recipe(1, name="mojito")])
+
+    card = await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mojito")
+
+    assert card.name == "Mojito"
+
+
+async def test_the_same_name_in_another_category_is_still_allowed() -> None:
+    """Decision D6 keys a card by category *and* name: an Americano is two drinks."""
+    harness = Harness(
+        recipes=[
+            make_recipe(1, name="Americano", category=COCKTAILS),
+            make_recipe(2, name="Americano", category=COFFEE),
+        ]
+    )
+
+    card = await harness.service.update(MANAGER, 2, RecipeField.CATEGORY, "tea")
+
+    assert card.category == "tea"
+
+
+async def test_the_composition_is_rewritten_whole() -> None:
+    """Decision D4 reads the amounts; the handler hands over the lines as they were typed."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito")],
+        ingredients=[make_ingredient(1, 1, name="White rum")],
+    )
+
+    card = await harness.service.update(
+        MANAGER,
+        1,
+        RecipeField.COMPOSITION,
+        f"Light rum — 50 {ML}\nLime — 25 {ML}",
+    )
+
+    assert [line.name for line in card.ingredients] == ["Light rum", "Lime"]
+    assert card.ingredients[0].kind is AmountKind.MEASURED
+    assert card.ingredients[0].unit is Unit.ML
+
+
+async def test_the_composition_can_be_taken_away_without_the_card() -> None:
+    """TZ 5.5: a card with nothing but a name is valid, so clearing one must be too."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito")],
+        ingredients=[make_ingredient(1, 1, name="White rum")],
+    )
+
+    card = await harness.service.update(MANAGER, 1, RecipeField.COMPOSITION, "")
+
+    assert card.ingredients == ()
+    assert harness.ingredients.ingredients == []
+    assert len(harness.recipes.recipes) == 1
+
+
+async def test_a_library_card_is_read_only() -> None:
+    """Question C4 is open, and the repository writes `for_venue()` (TZ 3.3).
+
+    Without this the edit would report success and change nothing: `RecipeRepo.update`
+    matches no row, and a service that ignored the `None` would hand back the card as it was
+    with a screen saying it had been saved.
+    """
+    harness = Harness(recipes=[make_recipe(1, name="Highball", venue_id=None)])
+
+    with pytest.raises(RecipeReadOnlyError):
+        await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mine")
+
+    with pytest.raises(RecipeReadOnlyError):
+        await harness.service.delete(MANAGER, 1)
+
+    assert harness.recipes.recipes[0].name == "Highball"
+
+
+async def test_another_venues_card_can_neither_be_edited_nor_deleted() -> None:
+    """TZ 9, acceptance 11.3: a forged id addresses nothing, and says nothing either.
+
+    The refusal comes from the *read*: `RecipeRepo.get` is venue-scoped, so a card of the
+    bar next door is `None` here exactly as a deleted one is. The write path carries its own
+    predicate as well, and the test below is what keeps that one honest — through the
+    repository rather than through the service, because the service never reaches it.
+    """
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito", venue_id=OTHER_VENUE_ID)],
+        ingredients=[make_ingredient(1, 1, name="foreign_rum")],
+    )
+
+    with pytest.raises(RecipeNotFoundError):
+        await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mine")
+
+    with pytest.raises(RecipeNotFoundError):
+        await harness.service.delete(MANAGER, 1)
+
+    assert harness.recipes.recipes[0].name == "Mojito"
+    assert [row.name for row in harness.ingredients.ingredients] == ["foreign_rum"]
+
+
+async def test_the_write_path_carries_its_own_venue_predicate() -> None:
+    """`RecipeRepo.update` and `delete` are `for_venue()` where `get` is `library()`.
+
+    Asserted against the repository and not through the service, and that is the point: the
+    service refuses a foreign row on the read and a library row on `venue_id`, so neither
+    ever reaches these two methods. The predicate is the second line of defence (TZ 3.3,
+    acceptance 11.3) — and without this test it is dead code that could be deleted whole
+    with every other test still green.
+    """
+    harness = Harness(
+        recipes=[
+            make_recipe(1, name="Mojito", venue_id=OTHER_VENUE_ID),
+            make_recipe(2, name="Highball", venue_id=None),
+        ]
+    )
+
+    assert await harness.recipes.update(1, name="stolen") is None
+    assert await harness.recipes.update(2, name="stolen") is None
+    assert await harness.recipes.delete(1) is False
+    assert await harness.recipes.delete(2) is False
+    assert [row.name for row in harness.recipes.recipes] == ["Mojito", "Highball"]
+
+    # Hidden by the predicate and not by an absence: its own venue writes the row normally.
+    neighbour = harness.recipes.neighbour(OTHER_VENUE_ID)
+    assert await neighbour.update(1, name="renamed") is not None
+    assert await neighbour.delete(1) is True
+
+
+async def test_a_card_that_is_not_there_is_the_same_answer() -> None:
+    """One refusal for "deleted" and "never yours", so an id cannot be used to find out."""
+    harness = Harness()
+
+    with pytest.raises(RecipeNotFoundError):
+        await harness.service.update(MANAGER, 404, RecipeField.NAME, "Mojito")
+
+
+async def test_staff_cannot_edit_or_delete_a_card() -> None:
+    """TZ 5.8: the reference data of a venue is its manager's (TZ 2, TZ 9)."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+
+    with pytest.raises(PermissionDeniedError):
+        await harness.service.update(STAFF, 1, RecipeField.NAME, "Beer")
+
+    with pytest.raises(PermissionDeniedError):
+        await harness.service.delete(STAFF, 1)
+
+    assert harness.recipes.recipes[0].name == "Mojito"
+    assert harness.audit.records == []
+
+
+async def test_an_edit_reaches_the_audit_log() -> None:
+    """TZ 2: the actor, the object and the difference — and only the field that moved."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojjito", glassware="highball")])
+
+    await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mojito")
+
+    (record,) = harness.audit.records
+    assert record["user_id"] == MANAGER.user_id
+    assert record["entity"] == AuditEntity.RECIPE
+    assert record["entity_id"] == 1
+    assert record["action"] == AuditAction.UPDATE
+    assert record["diff"] == {"name": {"from": "Mojjito", "to": "Mojito"}}
+
+
+async def test_an_edit_that_changes_nothing_is_not_recorded() -> None:
+    """A log full of empty diffs is a log nobody reads (`AuditTrail.updated`)."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+
+    await harness.service.update(MANAGER, 1, RecipeField.NAME, "Mojito")
+
+    assert harness.audit.records == []
+
+
+async def test_a_swapped_ingredient_is_recorded_although_the_count_did_not_move() -> None:
+    """Why the composition is recorded as its lines and not as their number (TZ 2)."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito")],
+        ingredients=[make_ingredient(1, 1, name="White rum", qty=Decimal("50"), unit=Unit.ML)],
+    )
+
+    await harness.service.update(MANAGER, 1, RecipeField.COMPOSITION, f"Dark rum — 50 {ML}")
+
+    (record,) = harness.audit.records
+    assert record["diff"] == {
+        "ingredients": {"from": ["White rum 50 ml"], "to": ["Dark rum 50 ml"]}
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Deleting a card (TZ 5.8)
+# --------------------------------------------------------------------------------------
+
+
+async def test_deleting_a_card_takes_its_composition_with_it() -> None:
+    """`ON DELETE CASCADE` (TZ 4.6): one write, and no orphan rows left behind."""
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito"), make_recipe(2, name="Daiquiri")],
+        ingredients=[
+            make_ingredient(1, 1, name="White rum"),
+            make_ingredient(2, 2, name="Lime"),
+        ],
+    )
+
+    gone = await harness.service.delete(MANAGER, 1)
+
+    assert gone == "Mojito"
+    assert [row.name for row in harness.recipes.recipes] == ["Daiquiri"]
+    assert [row.name for row in harness.ingredients.ingredients] == ["Lime"]
+
+
+async def test_a_deleted_name_can_be_entered_again() -> None:
+    """Why a card is deleted and not switched off: `is_active` stays inside the index.
+
+    A venue that removed a drink by mistake has to be able to enter it again, and a row the
+    unique index still counts would refuse the new card against something no screen shows.
+    """
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+
+    await harness.service.delete(MANAGER, 1)
+    card = await harness.service.create(
+        MANAGER,
+        RecipeDraft(name="Mojito", category=COCKTAILS, ingredients=["Light rum — 50"]),
+    )
+
+    assert card.name == "Mojito"
+    assert [row.name for row in harness.recipes.recipes] == ["Mojito"]
+    assert [line.name for line in card.ingredients] == ["Light rum"]
+
+
+async def test_the_deletion_reaches_the_audit_log() -> None:
+    """TZ 2: what it *was* is the one column a reader of a deletion wants."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito", glassware="highball")])
+
+    await harness.service.delete(MANAGER, 1)
+
+    (record,) = harness.audit.records
+    assert record["action"] == AuditAction.DELETE
+    assert record["entity_id"] == 1
+    diff = record["diff"]
+    assert diff is not None
+    assert diff["name"] == {"from": "Mojito", "to": None}
+    assert diff["glassware"] == {"from": "highball", "to": None}
+
+
+# --------------------------------------------------------------------------------------
+# What the audit log is told about an edit (TZ 2)
+# --------------------------------------------------------------------------------------
+
+
+async def test_rewriting_a_composition_with_the_same_text_records_nothing() -> None:
+    """The digest must compare numbers, not their scale.
+
+    `before` is read from the database, where `Numeric(12,3)` hands back `Decimal("50.000")`;
+    `after` is built from rows that were just inserted and never re-read, where the same
+    amount is `Decimal("50")`. Rendered with `str()` those are two different strings, so
+    every measured line read as changed — and an edit that rewrote the composition with the
+    identical text filed an `audit_log` record, which is exactly what `AuditTrail.updated`
+    exists to skip.
+    """
+    harness = Harness(
+        recipes=[make_recipe(1, name="Mojito")],
+        # The scale a `Numeric(12,3)` column gives back, spelled out.
+        ingredients=[make_ingredient(1, 1, name="White rum", qty=Decimal("50.000"), unit=Unit.ML)],
+    )
+
+    await harness.service.update(MANAGER, 1, RecipeField.COMPOSITION, f"White rum — 50 {ML}")
+
+    assert harness.audit.records == []
+
+
+async def test_an_edit_names_whoever_made_it() -> None:
+    """`recipes.updated_by` answers «who last touched this row», not «who created it»."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+    harness.recipes.recipes[0].updated_by = 99
+
+    await harness.service.update(MANAGER, 1, RecipeField.GARNISH, "mint")
+
+    assert harness.recipes.recipes[0].updated_by == MANAGER.user_id
+
+
+async def test_a_composition_edit_names_whoever_made_it_too() -> None:
+    """The composition lives in a child table, and it is still the card that changed."""
+    harness = Harness(recipes=[make_recipe(1, name="Mojito")])
+    harness.recipes.recipes[0].updated_by = 99
+
+    await harness.service.update(MANAGER, 1, RecipeField.COMPOSITION, "Lime — 25")
+
+    assert harness.recipes.recipes[0].updated_by == MANAGER.user_id
+
+
+async def test_the_bulk_read_of_compositions_is_venue_scoped() -> None:
+    """The join is per row and not per call (TZ 3.3, acceptance 11.3).
+
+    Asserted against the repository directly, because the service never hands it an id it
+    did not just read through a venue-scoped query — which is what would make the predicate
+    dead code that could be deleted whole with the suite still green (CLAUDE.md).
+    """
+    harness = Harness(
+        recipes=[
+            make_recipe(1, name="Mojito"),
+            make_recipe(2, name="Foreign", venue_id=OTHER_VENUE_ID),
+            make_recipe(3, name="Shared", venue_id=None),
+        ],
+        ingredients=[
+            make_ingredient(1, 1, name="own_rum"),
+            make_ingredient(2, 2, name="foreign_rum"),
+            make_ingredient(3, 3, name="library_soda"),
+        ],
+    )
+
+    rows = await harness.ingredients.list_for_recipes([1, 2, 3, 404])
+
+    assert sorted(row.name for row in rows) == ["library_soda", "own_rum"]
+    # Hidden by the predicate, not by an absence: its own venue reads it normally.
+    neighbour = harness.recipes.neighbour(OTHER_VENUE_ID).ingredients
+    assert [row.name for row in await neighbour.list_for_recipes([2])] == ["foreign_rum"]

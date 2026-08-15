@@ -47,7 +47,12 @@ def section(categories: Sequence[str]) -> Screen:
     has no recipe, and until it has one there is nothing to search (TZ 8.1).
     """
     body = texts.TTK_SEARCH_PROMPT if categories else texts.TTK_EMPTY
-    return Screen(text=_joined((texts.TTK_TITLE, body)), markup=keyboards.section())
+    return Screen(
+        text=_joined((texts.TTK_TITLE, body)),
+        # The fast search of part IV is offered only where there is something to find: an
+        # empty catalogue would answer every letter with nothing (TZ 8.1).
+        markup=keyboards.section(offer_search=bool(categories)),
+    )
 
 
 def results(page: SearchPage, *, suggestions: Sequence[RecipeHit] = ()) -> Screen:

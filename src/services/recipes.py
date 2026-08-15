@@ -28,6 +28,18 @@ line-by-line wizard for eight ingredients is an hour of typing (the same reasoni
 decision B6) — into rows, and :meth:`RecipeService.create` refuses a second card carrying the
 key of decision D6 instead of quietly overwriting the first.
 
+**Correcting it is the third** (TZ 5.8: the reference data of a venue is its manager's).
+A card entered by hand has a typo in it sooner or later, and until :meth:`RecipeService.update`
+existed the only answer was a second card next to the first — which is the one thing
+decision D6 sets out to prevent. One field at a time, because that is what the screen edits;
+:meth:`RecipeService.delete` removes a card whole, and the composition goes with it through
+the foreign key rather than through a second call.
+
+**The inline answer needs whole cards, not names** (part IV of the stage 1 spec).
+:meth:`RecipeService.search_cards` is :meth:`RecipeService.search` with the compositions
+already attached — one query for the rows and one for every composition on the page, because
+the alternative is ten round trips for every letter a bartender types.
+
 Units are the one thing this module has no words for. `Unit` is a closed set fixed by code
 (TZ 4.4), but its short forms are interface language and language lives in
 ``src/bot/texts/``. So the vocabulary is handed in (``units=``) and an amount whose unit is
@@ -58,10 +70,10 @@ from src.services.audit import SILENT, AuditEntity, AuditTrail, snapshot
 #: TZ 5.5: "at most 10, with pagination".
 MAX_SEARCH_RESULTS = 10
 
-#: How many rows of one category are read at a time while looking for the twin of decision
-#: D6. A venue names a few hundred recipes in all (TZ 5.5), so one chunk normally answers;
-#: the loop that uses it is there so the answer stays complete when one does not.
-CATEGORY_SCAN_LIMIT = 100
+#: Key the composition is recorded under in `audit_log` (TZ 2). Not a column: the diff of
+#: an edited composition is about rows of `recipe_ingredients`, and a reader of the log
+#: wants the lines that changed rather than the number of them.
+COMPOSITION_KEY: Final = "ingredients"
 
 #: A service given no unit vocabulary: every amount then stays text (decision D4). The words
 #: themselves are interface language and live in `src/bot/texts/recipes.py`.
@@ -139,6 +151,76 @@ class RecipeExistsError(RecipeError):
         self.name = name
         self.category = category
         self.recipe_id = recipe_id
+
+
+class RecipeNotFoundError(RecipeError):
+    """The card is not there — deleted, or never this venue's (TZ 9).
+
+    One error for both, deliberately: a row of the bar next door is invisible to a
+    venue-scoped repository exactly as a deleted one is, and telling the two apart is how a
+    forged id becomes a way to find out what exists.
+    """
+
+    def __init__(self, recipe_id: int) -> None:
+        super().__init__(f"recipe {recipe_id} is not available in this venue")
+        self.recipe_id = recipe_id
+
+
+class RecipeReadOnlyError(RecipeError):
+    """A row of the shared BarPoint library, which a venue reads and does not write.
+
+    TZ 3.3 has `recipes.venue_id = NULL` mean "everybody's", and question C4 — may a venue
+    edit one — is open. Until it is answered the repository's writes are `for_venue()`, so
+    an edit of a library row would silently do nothing; this says so instead.
+    """
+
+    def __init__(self, recipe_id: int) -> None:
+        super().__init__(f"recipe {recipe_id} belongs to the shared library and is read-only")
+        self.recipe_id = recipe_id
+
+
+class RecipeField(enum.StrEnum):
+    """Which part of an existing card an edit is aimed at (TZ 5.8).
+
+    The values are one letter because this enum travels in `callback_data`, where the whole
+    budget is 64 bytes (`src/bot/callbacks.py`). Nothing persists them — an `audit_log` row
+    names the *column*, not this — so they are a routing key and not data.
+
+    :attr:`COMPOSITION` is the odd one and is handled apart everywhere: it is not a column of
+    `recipes` at all but the rows of `recipe_ingredients`, rewritten whole.
+    """
+
+    NAME = "n"
+    CATEGORY = "c"
+    GLASSWARE = "g"
+    METHOD = "m"
+    ICE = "i"
+    GARNISH = "r"
+    INSTRUCTION = "s"
+    COMPOSITION = "p"
+
+
+#: Which column of `recipes` each field writes. :attr:`RecipeField.COMPOSITION` is absent
+#: because it has none — see the enum's docstring.
+_COLUMNS: Final[Mapping[RecipeField, str]] = MappingProxyType(
+    {
+        RecipeField.NAME: "name",
+        RecipeField.CATEGORY: "category",
+        RecipeField.GLASSWARE: "glassware",
+        RecipeField.METHOD: "method",
+        RecipeField.ICE: "ice",
+        RecipeField.GARNISH: "garnish",
+        RecipeField.INSTRUCTION: "instruction",
+    }
+)
+
+#: The two fields a card cannot lose: they are the key of decision D6, and blanking either
+#: would leave a row no listing can caption and no duplicate check can compare.
+#:
+#: Public because a *screen* has to know it: the step that edits an optional field offers a
+#: way to clear it, and offering that on these two would promise what :meth:`RecipeService.update`
+#: refuses. One set, read by both, rather than two that agree until somebody edits one.
+REQUIRED_FIELDS: Final = frozenset({RecipeField.NAME, RecipeField.CATEGORY})
 
 
 class AmountKind(enum.StrEnum):
@@ -283,6 +365,31 @@ class SearchPage:
 
 
 @dataclass(frozen=True, slots=True)
+class CardPage:
+    """A page of whole cards, where :class:`SearchPage` is a page of captions.
+
+    The inline answer of part IV needs both halves of every hit at once: the dropdown row is
+    a name, and what is sent when it is tapped is the card. Two structures rather than one
+    because the screens that draw a keyboard need no compositions and must not pay for them
+    (TZ 5.5 measures this in seconds).
+    """
+
+    query: str
+    cards: tuple[RecipeCard, ...]
+    offset: int
+    limit: int
+    has_next: bool
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.cards
+
+    @property
+    def next_offset(self) -> int | None:
+        return self.offset + self.limit if self.has_next else None
+
+
+@dataclass(frozen=True, slots=True)
 class MissingRecipeAlert:
     """TZ 5.5: "Report that the recipe is missing" -> a notification to the manager."""
 
@@ -397,6 +504,44 @@ class RecipeService:
         found = await self._recipes.search(cleaned, limit=window + 1, offset=start)
         return _page(cleaned, found, offset=start, limit=window)
 
+    async def search_cards(
+        self,
+        query: str,
+        *,
+        offset: int = 0,
+        limit: int = MAX_SEARCH_RESULTS,
+    ) -> CardPage:
+        """The same search as :meth:`search`, with every composition already attached.
+
+        Two queries and not eleven: the rows, then all their ingredients at once
+        (`list_for_recipes`). The inline answer of part IV builds a whole page for every
+        letter typed, and a round trip per card is the difference between a list that keeps
+        up with a thumb and one that lags a word behind it.
+
+        The paging arithmetic deliberately repeats :meth:`search` rather than calling it: what
+        that method returns is captions, and the rows themselves — which a card is assembled
+        from — are gone by then. The one page-shaped fact both share is `limit + 1`, asking
+        for one row more than fits to learn whether another page follows.
+        """
+        cleaned = _normalise_query(query)
+        window = _window(limit)
+        start = max(offset, 0)
+        if not cleaned:
+            return CardPage(query="", cards=(), offset=start, limit=window, has_next=False)
+
+        found = _prefer_local(await self._recipes.search(cleaned, limit=window + 1, offset=start))
+        rows = found[:window]
+        compositions = _by_recipe(
+            await self._ingredients.list_for_recipes([row.id for row in rows])
+        )
+        return CardPage(
+            query=cleaned,
+            cards=tuple(_card(row, compositions.get(row.id, ())) for row in rows),
+            offset=start,
+            limit=window,
+            has_next=len(found) > window,
+        )
+
     async def browse(
         self,
         category: str,
@@ -483,42 +628,164 @@ class RecipeService:
         )
         return _card(recipe, rows)
 
-    async def _twin(self, *, name: str, category: str) -> Recipe | None:
-        """The row decision D6 says this draft would collide with, or `None`.
+    async def update(
+        self,
+        actor: AccessContext,
+        recipe_id: int,
+        field: RecipeField,
+        value: str | None,
+    ) -> RecipeCard:
+        """Correct one field of a card that already exists (TZ 5.8).
+
+        One field per call, because that is the shape of the screen: a manager who spotted a
+        typo in a name is not asked the other seven questions again. The card comes back
+        assembled, so what is shown after the edit is drawn by the same code as the card the
+        shift is reading — the confirmation and the card are one screen, as they are after a
+        create.
+
+        Three refusals, and each is a screen rather than a traceback:
+
+        * a card that is not this venue's is :class:`RecipeNotFoundError`, indistinguishable
+          from one that was deleted (TZ 9);
+        * a row of the shared library is :class:`RecipeReadOnlyError` — the repository writes
+          `for_venue()` only, so without this the edit would report success and change
+          nothing (question C4);
+        * a new name or category that collides with another card of the venue is
+          :class:`RecipeExistsError`, refused *before* the write for the same reason
+          :meth:`create` refuses it there: the alternative is an index violation the manager
+          cannot read. The card being edited is not its own twin.
+        """
+        require_manager(actor)
+        recipe = await self._writable(recipe_id)
+        cleaned = _clean(value)
+        if field in REQUIRED_FIELDS and cleaned is None:
+            raise RecipeIncompleteError(_COLUMNS[field])
+        if field is RecipeField.COMPOSITION:
+            return await self._rewrite_composition(actor, recipe, value or "")
+
+        column = _COLUMNS[field]
+        if field in REQUIRED_FIELDS and cleaned is not None:
+            await self._refuse_twin(recipe, field, cleaned)
+        # Read before the write and not after: `update()` returns the same object out of the
+        # identity map, so a snapshot taken afterwards would record the new value as the old
+        # one and the diff would come out empty (TZ 2).
+        before = snapshot(recipe, column)
+        # `updated_by` travels with every write, the way `TemplateService` maintains it: the
+        # column answers "who last touched this row", and a create that stamped it followed
+        # by edits that did not would have it name the wrong person from the second edit on.
+        written = await self._recipes.update(
+            recipe_id,
+            **{column: cleaned},
+            updated_by=actor.user_id,
+        )
+        if written is None:
+            # Gone between the read and the write; the repository refuses to say more.
+            raise RecipeNotFoundError(recipe_id)
+        await self._audit.updated(
+            actor,
+            AuditEntity.RECIPE,
+            written.id,
+            before=before,
+            after=snapshot(written, column),
+        )
+        return _card(written, await self._ingredients.list_for_recipe(written.id))
+
+    async def delete(self, actor: AccessContext, recipe_id: int) -> str:
+        """Remove a card whole, and answer with the name it had (TZ 5.8).
+
+        The composition goes with it through `ON DELETE CASCADE` rather than through a
+        second call: two writes where the schema already promises one is a way to leave
+        orphans behind when the second fails.
+
+        A card is deleted and not switched off, and that is a decision. `is_active` would
+        keep the row inside the unique index of decision D6, so a venue that removed a drink
+        by mistake could never enter it again — the index would refuse the new card against a
+        row no screen shows. Nothing in the schema points at `recipes`, so there is
+        no history to preserve except the `audit_log` record this writes.
+
+        The name is read before the row goes, and returned rather than looked up again:
+        after the delete there is nothing left to ask.
+        """
+        require_manager(actor)
+        recipe = await self._writable(recipe_id)
+        before = snapshot(recipe, *_AUDITED_FIELDS)
+        name = recipe.name.strip()
+        if not await self._recipes.delete(recipe_id):
+            raise RecipeNotFoundError(recipe_id)
+        await self._audit.deleted(actor, AuditEntity.RECIPE, recipe_id, before=before)
+        return name
+
+    async def _writable(self, recipe_id: int) -> Recipe:
+        """The card this venue may change, or the refusal that says why it may not."""
+        recipe = await self._recipes.get(recipe_id)
+        if recipe is None:
+            raise RecipeNotFoundError(recipe_id)
+        if recipe.venue_id is None:
+            raise RecipeReadOnlyError(recipe_id)
+        return recipe
+
+    async def _refuse_twin(self, recipe: Recipe, field: RecipeField, value: str) -> None:
+        """Decision D6 for an edit: the key this change would produce must still be free."""
+        name = value if field is RecipeField.NAME else recipe.name
+        category = value if field is RecipeField.CATEGORY else recipe.category
+        twin = await self._twin(name=name, category=category, besides=recipe.id)
+        if twin is not None:
+            raise RecipeExistsError(name=name, category=category, recipe_id=twin.id)
+
+    async def _rewrite_composition(
+        self,
+        actor: AccessContext,
+        recipe: Recipe,
+        typed: str,
+    ) -> RecipeCard:
+        """Replace the composition with what was typed (decision D4 reads the amounts).
+
+        A blank message is a valid answer and clears it: a card is valid with nothing but a
+        name (TZ 5.5), and a manager who entered a composition by mistake must be able to
+        take it away without deleting the card.
+        """
+        before = _composition_digest(await self._ingredients.list_for_recipe(recipe.id))
+        lines = parse_ingredients(typed, units=self._units)
+        rows = await self._ingredients.replace_all(
+            recipe.id,
+            [_ingredient_row(line) for line in lines],
+        )
+        # The composition is a child table, so the card's own row is untouched by the write
+        # above — and it is still the card that changed. Same column, same reason as above.
+        await self._recipes.update(recipe.id, updated_by=actor.user_id)
+        await self._audit.updated(
+            actor,
+            AuditEntity.RECIPE,
+            recipe.id,
+            before={COMPOSITION_KEY: before},
+            after={COMPOSITION_KEY: _composition_digest(rows)},
+        )
+        return _card(recipe, rows)
+
+    async def _twin(self, *, name: str, category: str, besides: int | None = None) -> Recipe | None:
+        """The row decision D6 says this name would collide with, or `None`.
 
         The key is `(venue_id, category, lower(btrim(name)))` — the unique index of
         `recipes`, and the same one :func:`_prefer_local` overlays by, so a venue can hold
         an Americano the cocktail next to an Americano the coffee.
 
-        Two halves of it are worth spelling out:
+        Three things about it are worth spelling out:
 
         * **library rows are not a collision.** The index treats `venue_id IS NULL` as its
           own scope, and a venue writing its own version of a shared recipe is exactly what
           :func:`_prefer_local` exists for. Refusing it here would make the overlay
-          unreachable (TZ 3.3);
-        * **the listing is read in chunks until it ends.** `list_by_category` is a page, and
-          a check that looked at the first page only would let a duplicate through as soon as
-          a category outgrew it — which is precisely when a manager stops remembering what
-          is already there.
-
-        The index remains the final authority: it also covers rows this listing does not show
-        (`is_active = false`). Nothing in stage 0 deactivates a recipe, and when something
-        does, this check is what has to learn about it.
+          unreachable (TZ 3.3). `find_by_key` is `for_venue()` and answers that by itself;
+        * **the index is asked, not a listing.** This used to page through
+          `list_by_category` until it ended, which was correct and blind in one place: that
+          listing filters on `is_active`, and the index does not. A card put away and its
+          name entered again would have passed the check and died on the constraint;
+        * **the row being edited is not its own twin** (`besides`). Correcting the case of a
+          name is a change of spelling, not a duplicate.
         """
-        key = _key(name, category)
-        offset = 0
-        while True:
-            found = await self._recipes.list_by_category(
-                category,
-                limit=CATEGORY_SCAN_LIMIT,
-                offset=offset,
-            )
-            for row in found:
-                if row.venue_id is not None and _overlay_key(row) == key:
-                    return row
-            if len(found) < CATEGORY_SCAN_LIMIT:
-                return None
-            offset += CATEGORY_SCAN_LIMIT
+        found = await self._recipes.find_by_key(name=name, category=category)
+        if found is None or found.id == besides:
+            return None
+        return found
 
     async def report_missing(self, *, query: str, reported_by: int) -> MissingRecipeAlert | None:
         """TZ 5.5: the employee says the recipe is not there, the manager hears about it.
@@ -571,6 +838,59 @@ def _ingredient_line(row: RecipeIngredient) -> IngredientLine:
         prep_id=row.prep_id,
         order_index=row.order_index,
     )
+
+
+def _by_recipe(rows: Sequence[RecipeIngredient]) -> dict[int, list[RecipeIngredient]]:
+    """One bulk read, split back into the cards it belongs to; order is preserved."""
+    grouped: dict[int, list[RecipeIngredient]] = {}
+    for row in rows:
+        grouped.setdefault(row.recipe_id, []).append(row)
+    return grouped
+
+
+def _composition_digest(rows: Sequence[RecipeIngredient]) -> tuple[str, ...]:
+    """The composition as `audit_log` records it: one string per line, in order (TZ 2).
+
+    Enough for a reader of the log to see *which* line moved, where a count would say only
+    that something did — and swapping one ingredient for another does not change a count, so
+    the record would have been skipped entirely.
+
+    A unit is written by its schema value and not by its interface word: this is a record and
+    not a screen, and the words live in `src/bot/texts/`.
+    """
+    return tuple(_digest_line(row) for row in sorted(rows, key=_ingredient_order))
+
+
+def _digest_line(row: RecipeIngredient) -> str:
+    name = row.name.strip()
+    amount = _digest_amount(row)
+    return name if amount is None else f"{name} {amount}"
+
+
+def _digest_amount(row: RecipeIngredient) -> str | None:
+    """The amount of one line, exactly as the three branches of decision D4 hold it."""
+    match classify_amount(row.qty, row.unit, row.qty_text):
+        case AmountKind.MEASURED if row.qty is not None and row.unit is not None:
+            return f"{_digest_number(row.qty)} {row.unit.value}"
+        case AmountKind.NUMERIC if row.qty is not None:
+            return _digest_number(row.qty)
+        case AmountKind.TEXT:
+            return _clean(row.qty_text)
+        case _:
+            return None
+
+
+def _digest_number(value: Decimal) -> str:
+    """«50», never «50.000» — the scale a `Numeric(12,3)` column hands back.
+
+    Without this the digest compares two different renderings of one number: `before` is
+    read from the database, where 50 came back as `Decimal("50.000")`, and `after` is built
+    from rows that were just inserted and never re-read, where it is still `Decimal("50")`.
+    Every measured line would then read as changed — including on an edit that rewrote the
+    composition with the very same text, which `AuditTrail.updated` exists to skip.
+    """
+    whole = value.to_integral_value()
+    return f"{whole:f}" if value == whole else f"{value.normalize():f}"
 
 
 def _key(name: str, category: str) -> tuple[str, str]:
@@ -713,19 +1033,24 @@ def _hit(recipe: Recipe) -> RecipeHit:
 
 
 __all__ = [
-    "CATEGORY_SCAN_LIMIT",
+    "COMPOSITION_KEY",
     "MAX_SEARCH_RESULTS",
     "NO_UNITS",
+    "REQUIRED_FIELDS",
     "AmountKind",
+    "CardPage",
     "IngredientLine",
     "MissingRecipeAlert",
     "RecipeCard",
     "RecipeDraft",
     "RecipeError",
     "RecipeExistsError",
+    "RecipeField",
     "RecipeHit",
     "RecipeIncompleteError",
+    "RecipeNotFoundError",
     "RecipeNotifier",
+    "RecipeReadOnlyError",
     "RecipeService",
     "SearchPage",
     "classify_amount",

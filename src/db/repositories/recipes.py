@@ -164,6 +164,43 @@ class RecipeRepo(BaseRepository[Recipe]):
         rows = await self.session.scalars(stmt)
         return rows.all()
 
+    async def find_by_key(self, *, name: str, category: str) -> Recipe | None:
+        """The venue's own row carrying the key of decision D6, whatever its state.
+
+        `for_venue()` and not `library()`: a shared library row is not a collision — a venue
+        writing its own version of one is what the overlay in the service exists for.
+
+        Deliberately blind to `is_active`, where every listing above filters on it. The
+        unique index is blind to it too, so a check that skipped a switched-off row would
+        hand the manager an index violation instead of an answer, exactly when a name is
+        reused after a card was put away.
+        """
+        stmt = self.for_venue().where(
+            func.lower(func.btrim(Recipe.category)) == _folded(category),
+            func.lower(func.btrim(Recipe.name)) == _folded(name),
+        )
+        rows = await self.session.scalars(stmt)
+        return rows.first()
+
+    async def delete(self, recipe_id: int) -> bool:
+        """Remove one card of this venue; `False` when the id names none of them.
+
+        `recipe_ingredients.recipe_id` is `ON DELETE CASCADE` (TZ 4.6), so the composition
+        goes with the card and no orphan row is left behind.
+
+        The venue predicate is what makes a forged id harmless, and `venue_id = NULL` is not
+        matched by it: a library row is read-only until question C4 is answered, so this
+        deletes a venue's own card or nothing at all.
+        """
+        statement = (
+            delete(Recipe)
+            .where(Recipe.id == recipe_id, Recipe.venue_id == self.venue_id)
+            .returning(Recipe.id)
+            .execution_options(synchronize_session=False)
+        )
+        removed = await self.session.scalars(statement)
+        return removed.first() is not None
+
     async def list_categories(self) -> Sequence[str]:
         """Categories the venue has actually used — empty until it enters its first recipe."""
         stmt = (
@@ -268,6 +305,30 @@ class RecipeIngredientRepo(ChildRepository[RecipeIngredient, Recipe]):
             self.library()
             .where(RecipeIngredient.recipe_id == recipe_id)
             .order_by(RecipeIngredient.order_index, RecipeIngredient.id)
+        )
+        rows = await self.session.scalars(stmt)
+        return rows.all()
+
+    async def list_for_recipes(self, recipe_ids: Sequence[int]) -> Sequence[RecipeIngredient]:
+        """The composition of several cards at once, in one query.
+
+        Written for the inline answer (TZ 5.5 through part IV of the stage 1 spec), which
+        assembles ten cards for every letter typed: ten round trips per keystroke is the
+        difference between a list that keeps up with a thumb and one that does not.
+
+        An empty list of ids is answered without asking the database — `IN ()` is not a
+        predicate PostgreSQL accepts, and there is nothing to look for anyway.
+        """
+        if not recipe_ids:
+            return []
+        stmt = (
+            self.library()
+            .where(RecipeIngredient.recipe_id.in_(list(recipe_ids)))
+            .order_by(
+                RecipeIngredient.recipe_id,
+                RecipeIngredient.order_index,
+                RecipeIngredient.id,
+            )
         )
         rows = await self.session.scalars(stmt)
         return rows.all()

@@ -16,7 +16,11 @@ matches, so the order is a rule and not a listing:
    middleware that enforces that (`src/bot/middlewares/menu.py`) has already run.
 3. `checklist` — TZ 5.4, the employee's screen.
 4. `recipes` — TZ 5.5, the search and the card.
-5. `admin` and the `admin_*` modules — TZ 5.8: the board of the management section, then
+5. `inline` — TZ 5.5 again, through the one autocomplete Telegram has. Its position in the
+   list is of no consequence and that is worth stating: it registers on `inline_query`, an
+   update type nothing else in the tree listens for, so no order can put another router in
+   front of it.
+6. `admin` and the `admin_*` modules — TZ 5.8: the board of the management section, then
    one module per block of it. They come last because every one of them is reached from a
    button of its own and nothing routes to them by accident; among themselves the order
    does not matter, because each filters on its own callback factories.
@@ -44,6 +48,7 @@ from src.bot.handlers import (
     admin_staff,
     admin_venue,
     checklist,
+    inline,
     menu,
     onboarding,
     recipes,
@@ -62,6 +67,7 @@ def all_routers() -> tuple[Router, ...]:
         menu.router(),
         checklist.router(),
         recipes.router(),
+        inline.router(),
         admin.router(),
         admin_venue.router(),
         admin_staff.router(),
@@ -82,6 +88,7 @@ __all__ = [
     "admin_venue",
     "all_routers",
     "checklist",
+    "inline",
     "menu",
     "onboarding",
     "recipes",

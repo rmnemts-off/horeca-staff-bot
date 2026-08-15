@@ -29,11 +29,13 @@ import re
 from typing import Final
 
 import pytest
+from src.bot import texts
 from src.bot.renderers import StageZeroRenderers
 from src.bot.views import (
     admin,
     checklist,
     editor,
+    inline,
     onboarding,
     quoted,
     recipe_form,
@@ -45,6 +47,7 @@ from src.bot.views import (
 from src.db.models import ChecklistType, InviteCode, MemberRole, Venue, VenueSettings
 from src.services.access import InviteRejection
 from src.services.notifications import NotificationType
+from src.services.recipes import RecipeField
 from src.services.shifts import ShiftRole, ShiftWarning
 from src.services.templates import TemplateGroupView, TemplateItemView, TemplateView
 from src.services.venues import VenueConfiguration
@@ -365,6 +368,34 @@ def test_recipe_form_screens_survive_hostile_text() -> None:
     )
     assert_telegram_html(recipe_form.saved(card).text)
     assert_telegram_html(recipe_form.exists(name=HOSTILE, category=HOSTILE, recipe_id=1).text)
+    # The manager's half of TZ 5.8: the card again, now with a button per field, the
+    # question that precedes a deletion, and the listing a search comes back with. Every one
+    # of them formats a name the venue typed.
+    assert_telegram_html(recipe_form.managed(card).text)
+    # `note` is wording and not venue text (`texts.CARD_UPDATED`), so it is passed as such:
+    # feeding it hostile input would assert about a value nothing can produce.
+    assert_telegram_html(recipe_form.managed(card, note=texts.CARD_UPDATED).text)
+    assert_telegram_html(recipe_form.delete_question(card).text)
+    assert_telegram_html(recipe_form.deleted(HOSTILE, [HOSTILE]).text)
+    for field in RecipeField:
+        assert_telegram_html(recipe_form.field_step(card, field).text)
+    hits = [make_hit(recipe_id=1, name=HOSTILE, category=HOSTILE)]
+    assert_telegram_html(recipe_form.listing(make_page(hits)).text)
+    assert_telegram_html(recipe_form.listing(make_page(query=HOSTILE)).text)
+
+
+def test_an_inline_row_sends_the_card_and_survives_hostile_text() -> None:
+    """What a row of the dropdown sends is a message like any other (part IV).
+
+    It is HTML for the same reason every screen is — the parse mode belongs to the bot — and
+    it is *not* drawn here: the row carries `views/recipes.py::card`, which is the point of
+    the feature and the reason this assertion is one line.
+    """
+    card = make_card(name=HOSTILE, category=HOSTILE, ingredients=[make_line(HOSTILE)])
+
+    (result,) = inline.results([card])
+
+    assert_telegram_html(result.input_message_content.message_text)
 
 
 async def test_notification_bodies_survive_hostile_text() -> None:

@@ -91,15 +91,36 @@ def pager(page: SearchPage) -> Row:
     return row
 
 
-def section() -> InlineKeyboardMarkup:
+def fast_search_button() -> InlineKeyboardButton:
+    """The one honest form of "the list updates while I type" (part IV of the stage 1 spec).
+
+    `switch_inline_query_current_chat` puts the bot's username into the input field of *this*
+    chat, and from there every letter reaches the bot and redraws the list above the
+    keyboard. A bot is told nothing about a message before it is sent, so this is not a
+    shortcut to autocomplete — it is the only place autocomplete exists.
+
+    It carries no `callback_data` and reaches no handler: the press is handled by the
+    Telegram client itself. That is also why it is invisible to the assembly test that pairs
+    factories with routers — there is no factory to pair.
+    """
+    return InlineKeyboardButton(
+        text=texts.TTK_INLINE_BUTTON,
+        switch_inline_query_current_chat="",
+    )
+
+
+def section(*, offer_search: bool = True) -> InlineKeyboardMarkup:
     """The section itself: one step from the menu, so a back button would repeat home.
 
-    Nothing else is on it. Browsing by category needs a button that carries a category, and
-    the scheme has no factory for one (see the module docstring of
-    `src/bot/handlers/recipes.py`); a caption answering nothing is the dead button TZ 8.1
-    forbids.
+    One button on it, and it is not a screen of ours: the fast search of part IV, which the
+    client answers. A venue that has entered nothing does not get it — a search over an
+    empty catalogue is the dead button TZ 8.1 forbids, and the screen already says the
+    honest thing («no recipes yet, ask your manager»).
+
+    Browsing by category needs a button that carries a category, and the scheme has no
+    factory for one (see the module docstring of `src/bot/handlers/recipes.py`).
     """
-    return submenu(back=False)
+    return submenu(*([fast_search_button()],) if offer_search else (), back=False)
 
 
 def hits(page: SearchPage) -> InlineKeyboardMarkup:
@@ -137,6 +158,7 @@ __all__ = [
     "Row",
     "back_to_section",
     "card",
+    "fast_search_button",
     "hit_button",
     "hits",
     "nothing_found",

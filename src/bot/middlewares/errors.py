@@ -34,10 +34,11 @@ from typing import Any, Final
 
 from aiogram import BaseMiddleware
 from aiogram.dispatcher.event.bases import CancelHandler, SkipHandler
-from aiogram.types import CallbackQuery, Message, TelegramObject, Update
+from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject, Update
 from aiogram.types.update import UpdateTypeLookupError
 
 from src.bot import texts
+from src.bot.inline import answer_nothing
 from src.logging import REQUEST_ID_FIELD, get_logger, request_context
 
 #: Name of the constant in `src/bot/texts/` holding "Something went wrong, try again"
@@ -143,6 +144,11 @@ class ErrorsMiddleware(BaseMiddleware):
             if isinstance(target, CallbackQuery):
                 # Always answered: an unanswered callback spins on the client for a minute.
                 await target.answer(text=text, show_alert=text is not None)
+            elif isinstance(target, InlineQuery):
+                # An inline query has no room for an apology and every reason to be closed:
+                # left unanswered it loads until the client gives up (`src/bot/inline.py`).
+                # The traceback is in the log either way.
+                await answer_nothing(target)
             elif isinstance(target, Message) and text is not None:
                 await target.answer(text)
         except Exception:

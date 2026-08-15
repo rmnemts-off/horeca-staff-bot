@@ -50,18 +50,32 @@ from src.bot.callbacks import (
     AdminAction,
     AdminCommand,
     AdminSection,
+    CatalogueCategory,
+    CataloguePage,
     OpenAdmin,
     RecipeCategory,
+    RecipeDrop,
+    RecipeEdit,
+    RecipeManage,
 )
 from src.bot.handlers.admin import BOT_KEY, Event, deliver, manager_of, refuse
 from src.bot.middlewares.menu import STATE_KEY
 from src.bot.middlewares.resolver import PAYLOAD_KEY
 from src.bot.middlewares.services import SERVICES_KEY
-from src.bot.states import RecipeWizard
+from src.bot.states import RecipeEditing, RecipeLookup, RecipeWizard
 from src.bot.views import Screen
 from src.bot.views import recipe_form as screens
 from src.services.access import AccessContext
-from src.services.recipes import RecipeCard, RecipeDraft, RecipeExistsError
+from src.services.recipes import (
+    RecipeCard,
+    RecipeDraft,
+    RecipeExistsError,
+    RecipeField,
+    RecipeIncompleteError,
+    RecipeNotFoundError,
+    RecipeReadOnlyError,
+    SearchPage,
+)
 
 #: Name of this router; read in a traceback and in the assembly test.
 ROUTER_NAME: Final = "admin_recipes"
@@ -77,6 +91,18 @@ ICE_FIELD: Final = "ice"
 COMPOSITION_FIELD: Final = "composition"
 GARNISH_FIELD: Final = "garnish"
 INSTRUCTION_FIELD: Final = "instruction"
+
+#: Keys of the lookup — what the listing is showing, so the pager can rebuild it. Named
+#: apart from the draft's own keys above: the section and the form are two scenarios over
+#: one storage, and a key they shared would be a category chosen in one arriving in the
+#: other.
+LOOKUP_QUERY: Final = "lookup_query"
+LOOKUP_CATEGORY: Final = "lookup_category"
+
+#: Keys of an edit in progress: a message carries neither the card nor the field, and the
+#: button that started the step carried both.
+EDITED_RECIPE: Final = "edited_recipe"
+EDITED_FIELD: Final = "edited_field"
 
 #: The categories the category step actually drew, kept beside the answers for the reason
 #: `src/bot/handlers/admin_venue.py::ZONES_KEY` gives: an index is resolved against *the page
@@ -97,6 +123,22 @@ class Catalogue(Protocol):
     async def categories(self) -> tuple[str, ...]: ...
 
     async def create(self, actor: AccessContext, draft: RecipeDraft) -> RecipeCard: ...
+
+    async def search(self, query: str, *, offset: int = ..., limit: int = ...) -> SearchPage: ...
+
+    async def browse(self, category: str, *, offset: int = ..., limit: int = ...) -> SearchPage: ...
+
+    async def card(self, recipe_id: int) -> RecipeCard | None: ...
+
+    async def update(
+        self,
+        actor: AccessContext,
+        recipe_id: int,
+        field: RecipeField,
+        value: str | None,
+    ) -> RecipeCard: ...
+
+    async def delete(self, actor: AccessContext, recipe_id: int) -> str: ...
 
 
 class CatalogueServices(Protocol):
@@ -166,15 +208,14 @@ async def open_catalogue(event: CallbackQuery, **data: Any) -> None:
 
     The state is dropped first, for the reason `admin_staff.open_staff` gives: this screen is
     the section's board, and arriving at it from a form that was interrupted must not leave a
-    half-filled draft waiting for the manager's next line.
+    half-filled draft waiting for the manager's next line. What replaces it is the lookup:
+    from here a typed line is a search for a card, not an answer to a question.
     """
     services = _catalogue(data)
     if manager_of(data) is None or services is None:
         await refuse(event)
         return
-    state: FSMContext = data[STATE_KEY]
-    await state.clear()
-    await deliver(event, screens.section(await services.recipes.categories()), bot=data[BOT_KEY])
+    await _open_section(event, data, services)
 
 
 # --------------------------------------------------------------------------------------
@@ -265,6 +306,173 @@ async def skip_step(event: CallbackQuery, **data: Any) -> None:
     await _advance(event, data, step=step, value=None)
 
 
+# --------------------------------------------------------------------------------------
+# Correcting a card that already exists (TZ 5.8)
+# --------------------------------------------------------------------------------------
+
+
+async def find_card(event: Message, **data: Any) -> None:
+    """A line typed into the section is a search for a card to correct (TZ 5.8).
+
+    The role is checked here and can be nowhere else, for the reason :func:`take_answer`
+    gives: no resolver runs on a message, so a section left open by somebody who has since
+    been demoted is stopped by this line (TZ 9).
+    """
+    services = _catalogue(data)
+    state: FSMContext = data[STATE_KEY]
+    if manager_of(data) is None or services is None:
+        await state.clear()
+        await refuse(event)
+        return
+    await state.set_data({LOOKUP_QUERY: (event.text or "").strip()})
+    await _draw_listing(event, data, services, offset=0)
+
+
+async def browse_category(event: CallbackQuery, **data: Any) -> None:
+    """One of the categories the section offered, opened as a list of its cards.
+
+    The index is resolved against the page held in the state, exactly as in the form's own
+    category step: a card added in another chat between the draw and the press must not turn
+    a button into a different category.
+
+    The press is a `CatalogueCategory` and not the form's `RecipeCategory`, which is what
+    keeps a section screen left further up the chat from answering the form's question
+    instead of browsing (see that class's docstring).
+    """
+    services = _catalogue(data)
+    state: FSMContext = data[STATE_KEY]
+    if manager_of(data) is None or services is None:
+        await state.clear()
+        await refuse(event)
+        return
+    chosen = _category_at(await _offered(state, services), data[PAYLOAD_KEY].index)
+    if chosen is None:
+        await _open_section(event, data, services)
+        return
+    await state.update_data({LOOKUP_CATEGORY: chosen, LOOKUP_QUERY: ""})
+    await _draw_listing(event, data, services, offset=0)
+
+
+async def turn_page(event: CallbackQuery, **data: Any) -> None:
+    """The pager of the listing: the same lookup, a different window (TZ 5.5)."""
+    services = _catalogue(data)
+    if manager_of(data) is None or services is None:
+        await refuse(event)
+        return
+    await _draw_listing(event, data, services, offset=max(data[PAYLOAD_KEY].offset, 0))
+
+
+async def open_card(event: CallbackQuery, **data: Any) -> None:
+    """One card, with a button per field and the deletion (TZ 5.8).
+
+    The resolver has already proved the row is this venue's own and that the presser may
+    manage it; the service is asked again because a card is the row *and* its composition,
+    and assembling that is not a handler's job.
+    """
+    services = _catalogue(data)
+    state: FSMContext = data[STATE_KEY]
+    if manager_of(data) is None or services is None:
+        await refuse(event)
+        return
+    await state.set_state(RecipeLookup.query)
+    await _draw_card(event, data, services, data[PAYLOAD_KEY].recipe_id)
+
+
+async def start_edit(event: CallbackQuery, **data: Any) -> None:
+    """A field of the open card: asked for, or — with `is_clear` — taken off (TZ 5.8).
+
+    Which card and which field are remembered in the state: the answer arrives as a message,
+    and a message carries neither. The clearing half needs no state at all, because the
+    press already says everything: this card, this field, empty.
+    """
+    services = _catalogue(data)
+    actor = manager_of(data)
+    state: FSMContext = data[STATE_KEY]
+    if actor is None or services is None:
+        await refuse(event)
+        return
+    payload = data[PAYLOAD_KEY]
+    if payload.is_clear:
+        await _write(event, data, services, actor, payload.recipe_id, payload.field, None)
+        return
+    card = await services.recipes.card(payload.recipe_id)
+    if card is None:
+        await _gone(event, data, services)
+        return
+    await state.set_state(RecipeEditing.value)
+    await state.set_data({EDITED_RECIPE: card.recipe_id, EDITED_FIELD: str(payload.field)})
+    await deliver(event, screens.field_step(card, payload.field), bot=data[BOT_KEY])
+
+
+async def take_value(event: Message, **data: Any) -> None:
+    """The new value of one field, as it was typed (TZ 5.8).
+
+    A message with no text in it — a photo, a sticker, a voice note held down by mistake
+    behind the bar — is **not an answer and least of all an empty one**. `event.text` is
+    `None` for all of those, and passing that on would clear the field and report success:
+    the manager loses a garnish they never meant to touch. Taking a field away is the button
+    on this screen (`RecipeEdit(is_clear=True)`), so anything unreadable re-asks the step.
+    """
+    services = _catalogue(data)
+    actor = manager_of(data)
+    state: FSMContext = data[STATE_KEY]
+    if actor is None or services is None:
+        await state.clear()
+        await refuse(event)
+        return
+    collected = await state.get_data()
+    recipe_id = collected.get(EDITED_RECIPE)
+    field = _field_of(collected.get(EDITED_FIELD))
+    if not isinstance(recipe_id, int) or field is None:
+        # The state went away underneath the message (a TTL, a deploy). Nothing is written,
+        # and the line is answered rather than swallowed (TZ 9).
+        await state.clear()
+        await event.answer(texts.ERROR_OUTDATED_SCREEN)
+        return
+
+    if event.text is None:
+        await _ask_again(event, data, services, recipe_id=recipe_id, field=field)
+        return
+
+    await _write(event, data, services, actor, recipe_id, field, event.text)
+
+
+async def drop_card(event: CallbackQuery, **data: Any) -> None:
+    """The deletion: the question, and — on the second press — the deletion itself.
+
+    One handler for both because they are one decision, and the payload says which half of
+    it this press is. Nothing in the schema keeps a removed card, so the question is not
+    optional (TZ 8.2).
+    """
+    services = _catalogue(data)
+    actor = manager_of(data)
+    state: FSMContext = data[STATE_KEY]
+    if actor is None or services is None:
+        await refuse(event)
+        return
+    payload = data[PAYLOAD_KEY]
+    if not payload.is_confirmed:
+        card = await services.recipes.card(payload.recipe_id)
+        if card is None:
+            await _gone(event, data, services)
+            return
+        await deliver(event, screens.delete_question(card), bot=data[BOT_KEY])
+        return
+
+    await state.set_state(RecipeLookup.query)
+    try:
+        name = await services.recipes.delete(actor, payload.recipe_id)
+    except RecipeReadOnlyError:
+        await _refuse_with(event, data, texts.CARD_READ_ONLY)
+        return
+    except RecipeNotFoundError:
+        await _gone(event, data, services)
+        return
+    categories = await services.recipes.categories()
+    await state.update_data({OFFERED_KEY: list(categories), LOOKUP_CATEGORY: "", LOOKUP_QUERY: ""})
+    await deliver(event, screens.deleted(name, categories), bot=data[BOT_KEY])
+
+
 async def stale_step(event: CallbackQuery, **data: Any) -> None:
     """A form button pressed in a state it does not belong to (TZ 9: always answer).
 
@@ -288,6 +496,143 @@ def _catalogue(data: dict[str, Any]) -> CatalogueServices | None:
     """
     services: CatalogueServices | None = data.get(SERVICES_KEY)
     return services
+
+
+def _field_of(remembered: object) -> RecipeField | None:
+    """The field an interrupted step was about, or `None` when the state has lost it.
+
+    Anything that is not one of the eight reads as absent — a value left in Redis by a
+    version of this module that named its fields differently is a state to restart from, not
+    a column to write into.
+    """
+    if not isinstance(remembered, str):
+        return None
+    try:
+        return RecipeField(remembered)
+    except ValueError:
+        return None
+
+
+async def _open_section(event: Event, data: dict[str, Any], services: CatalogueServices) -> None:
+    """The section, on a clean lookup: the previous search is not this one's."""
+    state: FSMContext = data[STATE_KEY]
+    categories = await services.recipes.categories()
+    await state.set_state(RecipeLookup.query)
+    await state.set_data({OFFERED_KEY: list(categories)})
+    await deliver(event, screens.section(categories), bot=data[BOT_KEY])
+
+
+async def _draw_listing(
+    event: Event,
+    data: dict[str, Any],
+    services: CatalogueServices,
+    *,
+    offset: int,
+) -> None:
+    """Re-run the remembered lookup at one window and put the result on the screen.
+
+    The page is rebuilt from the state rather than held in it, for the reason
+    `src/bot/handlers/recipes.py` gives: a page kept in the state stops matching the database
+    the moment a card is edited, and this is the very screen that edits them.
+    """
+    state: FSMContext = data[STATE_KEY]
+    collected = await state.get_data()
+    category = _remembered(collected, LOOKUP_CATEGORY)
+    if category:
+        page = await services.recipes.browse(category, offset=offset)
+    else:
+        page = await services.recipes.search(_remembered(collected, LOOKUP_QUERY), offset=offset)
+    await state.set_state(RecipeLookup.query)
+    await deliver(event, screens.listing(page), bot=data[BOT_KEY])
+
+
+async def _draw_card(
+    event: Event,
+    data: dict[str, Any],
+    services: CatalogueServices,
+    recipe_id: int,
+    *,
+    note: str = "",
+) -> None:
+    """The managed card, or the screen for a card that is no longer there."""
+    card = await services.recipes.card(recipe_id)
+    if card is None:
+        await _gone(event, data, services)
+        return
+    await deliver(event, screens.managed(card, note=note), bot=data[BOT_KEY])
+
+
+async def _write(
+    event: Event,
+    data: dict[str, Any],
+    services: CatalogueServices,
+    actor: AccessContext,
+    recipe_id: int,
+    field: RecipeField,
+    value: str | None,
+) -> None:
+    """The one write of the editor, and the four refusals it can come back with (TZ 5.8).
+
+    Shared by the typed answer and by the clear button, so both end on the same screen and
+    both are refused the same way — two copies of this would be two sets of branches, and
+    the second would be the one that forgets `RecipeExistsError`.
+    """
+    state: FSMContext = data[STATE_KEY]
+    await state.set_state(RecipeLookup.query)
+    try:
+        card = await services.recipes.update(actor, recipe_id, field, value)
+    except RecipeExistsError as clash:
+        await deliver(
+            event,
+            screens.exists(name=clash.name, category=clash.category, recipe_id=clash.recipe_id),
+            bot=data[BOT_KEY],
+        )
+        return
+    except RecipeIncompleteError:
+        # The name or the category, blanked. Decision D6 keeps both, so the step is asked
+        # again instead of being answered with a refusal (TZ 8.1: no dead end).
+        await _ask_again(event, data, services, recipe_id=recipe_id, field=field)
+        return
+    except RecipeReadOnlyError:
+        await _refuse_with(event, data, texts.CARD_READ_ONLY)
+        return
+    except RecipeNotFoundError:
+        await _gone(event, data, services)
+        return
+    await deliver(event, screens.managed(card, note=texts.CARD_UPDATED), bot=data[BOT_KEY])
+
+
+async def _ask_again(
+    event: Event,
+    data: dict[str, Any],
+    services: CatalogueServices,
+    *,
+    recipe_id: int,
+    field: RecipeField,
+) -> None:
+    """The same field, asked once more — a blank answer to one that cannot be blank."""
+    state: FSMContext = data[STATE_KEY]
+    card = await services.recipes.card(recipe_id)
+    if card is None:
+        await _gone(event, data, services)
+        return
+    await state.set_state(RecipeEditing.value)
+    await state.update_data({EDITED_RECIPE: recipe_id, EDITED_FIELD: str(field)})
+    await deliver(event, screens.field_step(card, field), bot=data[BOT_KEY])
+
+
+async def _gone(event: Event, data: dict[str, Any], services: CatalogueServices) -> None:
+    """The card went away between the screen being drawn and the button being pressed."""
+    await _refuse_with(event, data, texts.ERROR_GONE)
+    await _open_section(event, data, services)
+
+
+async def _refuse_with(event: Event, data: dict[str, Any], text: str) -> None:
+    """Say why, in the one place a press can be answered without redrawing anything."""
+    if isinstance(event, CallbackQuery):
+        await event.answer(text, show_alert=True)
+        return
+    await event.answer(text)
 
 
 def _next(step: Step) -> Step | None:
@@ -450,18 +795,50 @@ def router() -> Router:
         AdminCommand.filter(F.action == AdminAction.STEP_SKIP),
     )
     instance.callback_query.register(stale_step, RecipeCategory.filter())
+    # The two presses of the *section* — browse a category, turn the page of a listing. Both
+    # are state-filtered and both have the same apology behind them, and that pair is a rule
+    # rather than symmetry: each rebuilds its screen out of what the FSM state remembers
+    # (`LOOKUP_QUERY`, `LOOKUP_CATEGORY`, `OFFERED_KEY`), and the wizard and the field editor
+    # both *replace* that data. Without the filter a pager button left on an older message
+    # would page a lookup that is no longer there — and drag the manager out of the form they
+    # are in the middle of, since drawing a listing sets the state back.
+    instance.callback_query.register(
+        browse_category,
+        CatalogueCategory.filter(),
+        StateFilter(RecipeLookup.query),
+    )
+    instance.callback_query.register(
+        turn_page,
+        CataloguePage.filter(),
+        StateFilter(RecipeLookup.query),
+    )
+    instance.callback_query.register(stale_step, CatalogueCategory.filter())
+    instance.callback_query.register(stale_step, CataloguePage.filter())
+    # Correcting a card (TZ 5.8). None of these is state-filtered: a card is opened from a
+    # listing, from a screen left open an hour ago and from the confirmation of an edit, and
+    # each of those is a legitimate press. What they are *not* allowed to do is reach another
+    # venue's row, and that is the resolver's rule rather than a state.
+    instance.callback_query.register(open_card, RecipeManage.filter())
+    instance.callback_query.register(start_edit, RecipeEdit.filter())
+    instance.callback_query.register(drop_card, RecipeDrop.filter())
     instance.message.register(take_answer, StateFilter(*(step.state for step in FORM)))
+    instance.message.register(take_value, StateFilter(RecipeEditing.value))
+    instance.message.register(find_card, StateFilter(RecipeLookup.query), F.text)
     return instance
 
 
 __all__ = [
     "CATEGORY_FIELD",
     "COMPOSITION_FIELD",
+    "EDITED_FIELD",
+    "EDITED_RECIPE",
     "FORM",
     "GARNISH_FIELD",
     "GLASSWARE_FIELD",
     "ICE_FIELD",
     "INSTRUCTION_FIELD",
+    "LOOKUP_CATEGORY",
+    "LOOKUP_QUERY",
     "METHOD_FIELD",
     "NAME_FIELD",
     "OFFERED_KEY",
@@ -472,11 +849,18 @@ __all__ = [
     "Catalogue",
     "CatalogueServices",
     "Step",
+    "browse_category",
     "choose_category",
+    "drop_card",
+    "find_card",
+    "open_card",
     "open_catalogue",
     "router",
     "skip_step",
     "stale_step",
+    "start_edit",
     "start_form",
     "take_answer",
+    "take_value",
+    "turn_page",
 ]

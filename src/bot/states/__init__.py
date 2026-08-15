@@ -182,6 +182,32 @@ class RecipeWizard(StatesGroup):
     instruction = State()
 
 
+class RecipeLookup(StatesGroup):
+    """TZ 5.8: finding the card to correct, in the manager's half of the catalogue.
+
+    One step and not two, where :class:`RecipeSearch` has `query` and `results`: this screen
+    accepts a typed name in either position and the next line is always a new search, so a
+    second state would be a name for the same behaviour. What is being looked at — a query
+    or a category, and how far into it — is in `state.get_data()`, because the pager button
+    carries an offset and nothing else (rule 2 of `src/bot/callbacks.py`).
+
+    Deliberately not a wizard (see :data:`WIZARDS`): nothing here is typed-in data waiting
+    to be saved, it is where the manager is standing.
+    """
+
+    query = State()
+
+
+class RecipeEditing(StatesGroup):
+    """TZ 5.8: one field of an existing card, being retyped.
+
+    Which card and which field are in `state.get_data()`; the button that started the step
+    carried both (`callbacks.RecipeEdit`), and a line of text carries neither.
+    """
+
+    value = State()
+
+
 #: Groups whose half-filled input is worth a question before it is dropped (TZ 5.2:
 #: "asks only when there is unsaved data").
 #:
@@ -200,6 +226,7 @@ WIZARDS: Final[frozenset[str]] = frozenset(
         InviteWizard.__name__,
         MemberEditing.__name__,
         Onboarding.__name__,
+        RecipeEditing.__name__,
         RecipeWizard.__name__,
         ReportWizard.__name__,
         SettingsEdit.__name__,
@@ -270,6 +297,8 @@ __all__ = [
     "InviteWizard",
     "MemberEditing",
     "Onboarding",
+    "RecipeEditing",
+    "RecipeLookup",
     "RecipeSearch",
     "RecipeWizard",
     "ReportWizard",

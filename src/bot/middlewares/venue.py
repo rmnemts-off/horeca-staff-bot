@@ -19,9 +19,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject
 
 from src.bot import texts
+from src.bot.inline import answer_nothing
 from src.bot.middlewares.auth import ACTOR_KEY
 from src.bot.middlewares.errors import inner_event
 from src.bot.middlewares.services import CONTAINER_KEY, SERVICES_KEY, Container
@@ -70,15 +71,20 @@ class VenueContextMiddleware(BaseMiddleware):
 
     @staticmethod
     async def _refuse(target: TelegramObject) -> None:
-        """The same refusal on both roads in, because the update ends the same way.
+        """The same refusal on all three roads in, because the update ends the same way.
 
         A button press was already answered here — without it the client spins for a
         minute (TZ 9). A *message* was not, and silence is the worst answer of the three:
         the employee writes to the bot, gets nothing back and reads it as a broken bot
         rather than as a venue that was switched off. The wording is the neutral refusal of
         TZ 9: whether the venue exists at all is not this update's business.
+
+        An inline query has nowhere to put wording, so it is answered with nothing at all
+        (`src/bot/inline.py`) — which still ends the loading, and that is the point.
         """
-        if isinstance(target, CallbackQuery):
+        if isinstance(target, InlineQuery):
+            await answer_nothing(target)
+        elif isinstance(target, CallbackQuery):
             await target.answer(texts.ERROR_NOT_ALLOWED, show_alert=True)
         elif isinstance(target, Message):
             await target.answer(texts.ERROR_NOT_ALLOWED)

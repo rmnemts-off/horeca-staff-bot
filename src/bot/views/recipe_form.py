@@ -28,14 +28,14 @@ and a category called «Rum & Cola» must not arrive as a broken entity.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Final
 
 from src.bot import texts
 from src.bot.keyboards import recipe_form as keyboards
 from src.bot.views import Screen, quoted
 from src.bot.views import recipes as catalogue
-from src.services.recipes import RecipeCard
+from src.services.recipes import RecipeCard, RecipeField, SearchPage
 
 #: Between a screen's title and its body — one blank line, as in `src/bot/views/admin.py`.
 PARAGRAPH: Final = "\n\n"
@@ -48,29 +48,116 @@ def _titled(title: str, body: str) -> str:
     return f"{title}{PARAGRAPH}{body}"
 
 
+def _joined(blocks: Iterable[str]) -> str:
+    """Whatever is present, one block per line; an absent part leaves no blank line."""
+    return "\n".join(block for block in blocks if block)
+
+
 # --------------------------------------------------------------------------------------
 # The section (TZ 5.8, 8.1)
 # --------------------------------------------------------------------------------------
 
 
 def section(categories: Sequence[str]) -> Screen:
-    """The manager's half of the catalogue: what is entered, and the way to enter more.
+    """The manager's half of the catalogue: what is entered, and the ways to change it.
 
     The categories stand in for a count of cards, which no service answers yet — see the
     report of task 30a. They are not decoration either: a category is half the key of
     decision D6, so this line is what tells a manager whether the drink they are about to
-    add already has a home.
+    add already has a home, and each of them is a button into what it holds.
+
+    A venue that has entered nothing is not invited to search: there is nothing to find, and
+    a prompt that answers every line with «nothing found» is worse than the honest empty
+    state of TZ 8.1.
     """
     body = (
-        texts.CARD_EDITOR_GROUPS_TEMPLATE.format(
-            groups=GROUP_SEPARATOR.join(quoted(name) for name in categories)
+        _joined(
+            (
+                texts.CARD_EDITOR_GROUPS_TEMPLATE.format(
+                    groups=GROUP_SEPARATOR.join(quoted(name) for name in categories)
+                ),
+                texts.CARD_FIND_PROMPT,
+            )
         )
         if categories
         else texts.CARD_EDITOR_EMPTY
     )
     return Screen(
         text=_titled(texts.CARD_EDITOR_TITLE, body),
-        markup=keyboards.section(),
+        markup=keyboards.section(categories),
+    )
+
+
+def listing(page: SearchPage) -> Screen:
+    """What a typed name or a pressed category came back with (TZ 5.5, 5.8).
+
+    One function and not two, the way `views/recipes.py::results` is one: which of the two
+    screens a lookup deserves is decided by the page the service returned, and a handler
+    choosing between two views would be the branch TZ 8.1 asks to keep out of handlers.
+    """
+    if page.is_empty:
+        return Screen(
+            text=_titled(
+                texts.CARD_EDITOR_TITLE,
+                texts.TTK_NOTHING_FOUND_TEMPLATE.format(query=quoted(page.query)),
+            ),
+            markup=keyboards.section(()),
+        )
+    found = [texts.TTK_FOUND_TEMPLATE.format(count=len(page.hits))]
+    if page.has_previous or page.has_next:
+        found.append(texts.TTK_PAGE_TEMPLATE.format(page=page.page_number))
+    return Screen(
+        text=_titled(texts.CARD_EDITOR_TITLE, _joined(found)),
+        markup=keyboards.listing(page),
+    )
+
+
+def managed(card: RecipeCard, *, note: str = "") -> Screen:
+    """The card as its manager sees it: what it says, and a button per field (TZ 5.8).
+
+    The card itself is drawn by the catalogue's own view for the reason :func:`saved` gives
+    — what the manager reads and what the shift reads must be the same text — and `note` is
+    the one line that says what has just happened to it.
+    """
+    return Screen(
+        text=_joined((note, catalogue.card(card).text)),
+        markup=keyboards.card_actions(card.recipe_id),
+    )
+
+
+def field_step(card: RecipeCard, field: RecipeField) -> Screen:
+    """One field, waiting for a line of text (TZ 5.8).
+
+    Taking the field away is a *button* on this screen and never an instruction to send an
+    empty message: Telegram refuses to send one, so a screen that asked for it would be
+    asking for something the client cannot do. The keyboard draws it only where clearing is
+    allowed — `REQUIRED_FIELDS` is the service's own set (decision D6).
+
+    The composition carries the format its lines are read in (decision D4).
+    """
+    lines = [
+        catalogue.card(card).text,
+        texts.CARD_EDIT_PROMPT_TEMPLATE.format(field=texts.field_label(field)),
+    ]
+    if field is RecipeField.COMPOSITION:
+        lines.append(texts.CARD_COMPOSITION_PROMPT)
+    return Screen(text=_joined(lines), markup=keyboards.edit_step(card.recipe_id, field))
+
+
+def delete_question(card: RecipeCard) -> Screen:
+    """Asked before, because there is no after (TZ 8.2: a destructive step is confirmed)."""
+    return Screen(
+        text=texts.CARD_DELETE_CONFIRM_TEMPLATE.format(name=quoted(card.name)),
+        markup=keyboards.delete_question(card.recipe_id),
+    )
+
+
+def deleted(name: str, categories: Sequence[str]) -> Screen:
+    """The card is gone, and what is left is the section it was in."""
+    body = texts.CARD_DELETED_TEMPLATE.format(name=quoted(name))
+    return Screen(
+        text=_joined((body, section(categories).text)),
+        markup=keyboards.section(categories),
     )
 
 
@@ -177,11 +264,16 @@ __all__ = [
     "PARAGRAPH",
     "category_step",
     "composition_step",
+    "delete_question",
+    "deleted",
     "exists",
+    "field_step",
     "garnish_step",
     "glassware_step",
     "ice_step",
     "instruction_step",
+    "listing",
+    "managed",
     "method_step",
     "name_step",
     "saved",

@@ -82,6 +82,26 @@ TTK_CARD_YIELD_BUTTON_TEMPLATE: Final = "{value}"
 TTK_CARD_SEASONAL_MARK: Final = "🍂 сезон"
 
 # --------------------------------------------------------------------------------------
+# Inline mode (part IV of the stage 1 spec; TZ 5.5)
+# --------------------------------------------------------------------------------------
+
+#: The button that starts the inline search inside the chat with the bot. Telegram fills the
+#: input field with «@бот » and the list then updates on every letter — which is the only way
+#: a list *can* update while somebody types, because a bot is not told about a message until
+#: it is sent.
+TTK_INLINE_BUTTON: Final = "🔎 Быстрый поиск"
+#: Shown above an empty inline answer when the query was typed somewhere other than the chat
+#: with the bot. Pressing it opens that chat, where the search works (open question В-12).
+TTK_INLINE_ELSEWHERE_BUTTON: Final = "Открыть в боте"
+#: The second line of a row in the dropdown: the category, and as much of the composition as
+#: fits. The category is not decoration — two drinks may share a name (decision D6).
+TTK_INLINE_HINT_TEMPLATE: Final = "{category} · {composition}"
+#: Between the ingredients of that line.
+TTK_INLINE_HINT_SEPARATOR: Final = ", "
+#: Appended when the composition did not fit into the line.
+TTK_INLINE_HINT_MORE_MARK: Final = "…"
+
+# --------------------------------------------------------------------------------------
 # Units (TZ 4.4: the set is code, the numbers are the venue's)
 # --------------------------------------------------------------------------------------
 
@@ -126,6 +146,11 @@ __all__ = [
     "TTK_EMPTY",
     "TTK_FOUND_TEMPLATE",
     "TTK_HIT_BUTTON_TEMPLATE",
+    "TTK_INLINE_BUTTON",
+    "TTK_INLINE_ELSEWHERE_BUTTON",
+    "TTK_INLINE_HINT_MORE_MARK",
+    "TTK_INLINE_HINT_SEPARATOR",
+    "TTK_INLINE_HINT_TEMPLATE",
     "TTK_MAYBE_TITLE",
     "TTK_MORE_BUTTON",
     "TTK_NOTHING_FOUND_TEMPLATE",

@@ -13,6 +13,11 @@ update *is*:
 * :data:`TAP_RATE` — callback queries: five a second sustained, twenty in reserve, which is
   the plan's "~5 a second, burst 20". Forty markers over twenty seconds never touch it, and
   the bucket refills faster than a thumb moves.
+* :data:`INLINE_RATE` — inline queries: **one update per letter typed** (part IV of the
+  stage 1 spec). Charged against the command budget, a six-letter drink would exhaust it on
+  the fifth letter and the list would freeze in the middle of the word — the same "the bot
+  is broken" the split above exists to prevent, on the one screen that is meant to keep up
+  with a thumb.
 
 Every callback query gets the tap budget, not only the checklist ones. A classifier that
 names the screens is a classifier somebody forgets to extend, and the failure mode is the
@@ -46,9 +51,10 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject
 
 from src.bot import texts
+from src.bot.inline import answer_nothing
 from src.bot.middlewares.errors import inner_event
 from src.logging import get_logger
 
@@ -107,6 +113,8 @@ class Budget(enum.StrEnum):
     COMMANDS = "commands"
     #: Button presses: the inside of a checklist, a pager, a wizard step.
     TAPS = "taps"
+    #: Inline queries: one per letter of a name being typed (TZ 5.5 through part IV).
+    INLINE = "inline"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +134,12 @@ COMMAND_RATE: Final = Rate(per_second=1.0, burst=5)
 
 #: Button presses (plan, task 20: "about 5 a second, burst 20").
 TAP_RATE: Final = Rate(per_second=5.0, burst=20)
+
+#: Inline queries. A whole word arrives as a burst of letters and then stops, which is what
+#: a deep bucket that refills modestly is for: fifteen covers a drink's name typed twice
+#: over with a correction, and three a second is faster than anybody spells a name they are
+#: reading off their own keyboard.
+INLINE_RATE: Final = Rate(per_second=3.0, burst=15)
 
 #: How often a throttled *message* is answered at all. Seconds.
 NOTICE_INTERVAL: Final = 5.0
@@ -172,14 +186,17 @@ class Limiter:
         clock: Clock = time.monotonic,
         max_tracked: int = MAX_TRACKED_USERS,
     ) -> None:
-        self._rates = (
-            dict(rates)
-            if rates is not None
-            else {
-                Budget.COMMANDS: COMMAND_RATE,
-                Budget.TAPS: TAP_RATE,
-            }
-        )
+        # Merged over the defaults rather than replacing them: a caller overrides the budget
+        # it is testing, and a budget it did not mention must still have a rate. Without the
+        # merge, an update of the unmentioned kind reaches `self._rates[budget]` and raises —
+        # inside the middleware whose whole job is to refuse cheaply.
+        self._rates = {
+            Budget.COMMANDS: COMMAND_RATE,
+            Budget.TAPS: TAP_RATE,
+            Budget.INLINE: INLINE_RATE,
+        }
+        if rates is not None:
+            self._rates.update(rates)
         self._clock = clock
         self._buckets: LruDict[tuple[Budget, int], TokenBucket] = LruDict(max_tracked)
 
@@ -202,6 +219,8 @@ class Limiter:
 
 def budget_for(event: TelegramObject) -> Budget:
     """Which allowance this update is charged against; see the module docstring."""
+    if isinstance(event, InlineQuery):
+        return Budget.INLINE
     return Budget.TAPS if isinstance(event, CallbackQuery) else Budget.COMMANDS
 
 
@@ -258,6 +277,12 @@ class ThrottlingMiddleware(BaseMiddleware):
             # Always: the spinner is the user's only feedback, and it lasts a minute.
             await target.answer(texts.ERROR_TOO_FAST)
             return
+        if isinstance(target, InlineQuery):
+            # Always, and for the same reason: an unanswered inline query loads until the
+            # client gives up. There is nowhere on that screen to write "slow down", so the
+            # answer is an empty one (`src/bot/inline.py`).
+            await answer_nothing(target)
+            return
         if not isinstance(target, Message):
             return
         now = self._clock()
@@ -282,6 +307,7 @@ def setup(
 
 __all__ = [
     "COMMAND_RATE",
+    "INLINE_RATE",
     "MAX_TRACKED_USERS",
     "NOTICE_INTERVAL",
     "TAP_RATE",

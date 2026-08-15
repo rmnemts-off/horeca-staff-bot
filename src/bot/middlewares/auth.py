@@ -39,9 +39,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Final, Protocol
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject
 
 from src.bot import texts
+from src.bot.inline import answer_nothing
 from src.bot.middlewares.errors import inner_event
 from src.bot.middlewares.services import ACCESS_KEY
 from src.bot.states import is_joining
@@ -172,8 +173,16 @@ class AuthMiddleware(BaseMiddleware):
         keyboard this bot drew, so its presser is either a member who has just been
         deactivated or somebody replaying somebody else's message. Neither is told what the
         button did (TZ 9).
+
+        An inline query gets an empty answer, which is the same refusal in the one shape
+        that screen has. It is answered rather than dropped for the reason
+        `src/bot/inline.py` gives: an unanswered query loads on the client until it gives
+        up, and a dismissed employee would read that as a bot that broke rather than as
+        access that ended.
         """
-        if isinstance(target, CallbackQuery):
+        if isinstance(target, InlineQuery):
+            await answer_nothing(target)
+        elif isinstance(target, CallbackQuery):
             await target.answer(texts.ERROR_NOT_ALLOWED, show_alert=True)
         elif isinstance(target, Message):
             await target.answer(texts.ONBOARDING_NO_ACCESS)
