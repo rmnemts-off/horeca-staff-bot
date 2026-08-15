@@ -62,6 +62,8 @@ REJECTION_TEXTS: Final[Mapping[InviteRejection, str]] = {
     InviteRejection.EXPIRED: texts.ONBOARDING_CODE_EXPIRED,
     InviteRejection.ALREADY_USED: texts.ONBOARDING_CODE_USED,
     InviteRejection.ALREADY_MEMBER: texts.ONBOARDING_CODE_ALREADY_MEMBER,
+    InviteRejection.ACCOUNT_TAKEN: texts.ONBOARDING_ACCOUNT_TAKEN,
+    InviteRejection.CARD_UNAVAILABLE: texts.ONBOARDING_CARD_UNAVAILABLE,
 }
 
 

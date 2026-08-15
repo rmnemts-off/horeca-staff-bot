@@ -80,7 +80,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
 
-from src.db.models import InviteCode, MemberRole, User, VenueMember
+from src.db.models import InviteCode, InvitePurpose, MemberRole, User, VenueMember
 from src.db.repositories.protocols import (
     InviteCodeRepository,
     UserRepository,
@@ -267,6 +267,12 @@ class InviteRejection(enum.StrEnum):
     #: link to check that it worked, the single use was spent on him, and the colleague he
     #: had already forwarded it to was told the code had been used.
     ALREADY_MEMBER = "already_member"
+    #: A `rebind` code typed by an account that already belongs to somebody else. The code
+    #: survives: the manager has to decide whose card this is, and issuing a fresh one would
+    #: not answer that question.
+    ACCOUNT_TAKEN = "account_taken"
+    #: The card a `rebind` code points at is gone or switched off.
+    CARD_UNAVAILABLE = "card_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,10 +285,34 @@ class InvitePreview:
     position: str | None
     suggested_full_name: str | None
     rejection: InviteRejection | None = None
+    #: `join` brings somebody in; `rebind` points an existing card at this account. The two
+    #: ask different questions on the next screen, so the difference has to survive here.
+    purpose: InvitePurpose = InvitePurpose.JOIN
+    #: The card a `rebind` code names, for the confirmation that follows.
+    member_id: int | None = None
 
     @property
     def is_valid(self) -> bool:
         return self.rejection is None
+
+
+@dataclass(frozen=True, slots=True)
+class RebindOutcome:
+    """What happened when a `rebind` code was typed.
+
+    `rejection` is `None` exactly when the card now opens with the account that typed it.
+    """
+
+    rejection: InviteRejection | None = None
+    member: VenueMember | None = None
+    venue_id: int | None = None
+    #: How many venues this person works in. The manager is told, because `telegram_id` is
+    #: global and the change reaches every one of them (TZ 2).
+    memberships: int = 1
+
+    @property
+    def is_rebound(self) -> bool:
+        return self.rejection is None and self.member is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,6 +742,143 @@ class AccessService:
         require_manager(actor)
         return await self.repositories.invites(actor.venue_id).list_pending()
 
+    async def issue_rebind_code(
+        self,
+        actor: AccessContext,
+        *,
+        member_id: int,
+        now: dt.datetime,
+    ) -> InviteCode:
+        """A code that points at a card and moves the account that opens it (TZ 5.1).
+
+        The problem it solves: somebody changes their Telegram account. Until now the only
+        way back was an ordinary invite, which creates a *second* `users` row and a second
+        membership — the roster shows the same name twice, and every shift, checklist and
+        write-off stays on the first one, because they hang off `users.id`.
+
+        This moves `users.telegram_id` instead, and nothing else. The history does not move
+        because it was never attached to the account in the first place.
+
+        Only one may be open per card at a time (`uq_invite_codes_open_rebind`): two
+        accounts racing for one card would both be told to confirm, and the loser would
+        quietly lose their access.
+        """
+        require_manager(actor)
+        members = self.repositories.members(actor.venue_id)
+        member = await members.get(member_id)
+        if member is None:
+            raise UnknownMembershipError(member_id, actor.venue_id)
+        require_venue(actor, member.venue_id)
+        require_outranks_target(actor, member)
+
+        moment = as_utc(now)
+        invites = self.repositories.invites(actor.venue_id)
+        for _ in range(INVITE_CODE_ATTEMPTS):
+            code = format_invite_code(actor.venue_id, new_invite_secret())
+            if await invites.get_by_code(code) is not None:
+                continue
+            return await invites.create(
+                code=code,
+                role=member.role,
+                expires_at=moment + INVITE_CODE_TTL,
+                position=member.position,
+                created_by=actor.user_id,
+                purpose=InvitePurpose.REBIND,
+                issued_to_member_id=member.id,
+            )
+        raise InviteCodeGenerationError(
+            f"could not draw a free invite code in {INVITE_CODE_ATTEMPTS} attempts"
+        )
+
+    async def activate_rebind_code(
+        self,
+        raw_code: str,
+        *,
+        telegram_id: int,
+        now: dt.datetime,
+        username: str | None = None,
+    ) -> RebindOutcome:
+        """Point an existing card at the account that just typed this code (TZ 5.1).
+
+        Writes exactly one column — `users.telegram_id` — and refuses in three ways that
+        each leave the code alone, because each of them needs the manager to decide
+        something rather than to issue a replacement:
+
+        * the account already belongs to *somebody else*: whose card is this?
+        * the card is gone or switched off: there is nothing to point at;
+        * the code is spent, revoked or expired: the ordinary reasons, shared with joining.
+
+        The one case that consumes the code without changing anything is the account that
+        is *already* on this card — the person opened their own link twice.
+        """
+        moment = as_utc(now)
+        parsed = parse_invite_code(raw_code)
+        if parsed is None:
+            return RebindOutcome(rejection=InviteRejection.MALFORMED)
+        venue_id, code = parsed
+
+        invites = self.repositories.invites(venue_id)
+        found = await invites.get_by_code(code)
+        if found is None or found.purpose is not InvitePurpose.REBIND:
+            return RebindOutcome(rejection=InviteRejection.UNKNOWN)
+        rejection = _invite_rejection(found, moment)
+        if rejection is not None:
+            return RebindOutcome(rejection=rejection, venue_id=venue_id)
+
+        members = self.repositories.members(venue_id)
+        member = (
+            None
+            if found.issued_to_member_id is None
+            else await members.get(found.issued_to_member_id)
+        )
+        if member is None or not member.is_active:
+            return RebindOutcome(rejection=InviteRejection.CARD_UNAVAILABLE, venue_id=venue_id)
+
+        users = self.repositories.users
+        occupant = await users.get_by_telegram_id(telegram_id)
+        if occupant is not None and occupant.id != member.user_id:
+            return RebindOutcome(rejection=InviteRejection.ACCOUNT_TAKEN, venue_id=venue_id)
+
+        before = await users.get(member.user_id)
+        if occupant is None:
+            await users.update(member.user_id, telegram_id=telegram_id, username=username)
+        await invites.mark_used(found.id, used_by=member.user_id, used_at=moment)
+        await self._record_rebind(
+            venue_id,
+            member=member,
+            before=None if before is None else before.telegram_id,
+            after=telegram_id,
+        )
+        return RebindOutcome(
+            member=member,
+            venue_id=venue_id,
+            memberships=len(await self.repositories.venues.list_for_user(member.user_id)),
+        )
+
+    async def _record_rebind(
+        self,
+        venue_id: int,
+        *,
+        member: VenueMember,
+        before: int | None,
+        after: int,
+    ) -> None:
+        """TZ 2 and TZ 9: `telegram_id` is the key to somebody's access, so a move is logged.
+
+        The actor is the person whose card moved. Nobody else's account changed, and the
+        manager who issued the code is on the `invite_codes.created_by` of that same row.
+        """
+        trail = AuditTrail(self.repositories.audit(venue_id))
+        if trail.is_silent:
+            return
+        await trail.updated(
+            None,
+            AuditEntity.MEMBER,
+            member.id,
+            before={"telegram_id": before},
+            after={"telegram_id": after},
+        )
+
     async def revoke_invite_code(
         self,
         actor: AccessContext,
@@ -753,9 +920,13 @@ class AccessService:
         rejection = _invite_rejection(found, moment)
         if (
             rejection is None
+            and found.purpose is not InvitePurpose.REBIND
             and telegram_id is not None
             and await self._is_active_member(venue_id, telegram_id=telegram_id)
         ):
+            # Only a joining code is refused here. A rebind code is *meant* for an account
+            # that may already be somebody — `activate_rebind_code` decides whether it is
+            # the right somebody, which is a different question with a different answer.
             rejection = InviteRejection.ALREADY_MEMBER
         return InvitePreview(
             venue_id=venue_id,
@@ -764,6 +935,8 @@ class AccessService:
             position=found.position,
             suggested_full_name=found.full_name,
             rejection=rejection,
+            purpose=found.purpose,
+            member_id=found.issued_to_member_id,
         )
 
     async def _is_active_member(self, venue_id: int, *, telegram_id: int) -> bool:
@@ -996,6 +1169,7 @@ __all__ = [
     "InviteRejection",
     "NaiveMomentError",
     "PermissionDeniedError",
+    "RebindOutcome",
     "SelfTargetError",
     "UnknownMembershipError",
     "VenueMismatchError",

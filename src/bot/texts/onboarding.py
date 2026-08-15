@@ -28,6 +28,16 @@ ONBOARDING_CODE_EXPIRED: Final = "Срок кода вышел. Попросит
 ONBOARDING_CODE_USED: Final = "Этот код уже сработал. Попросите новый."
 #: The person already works here, so the code was not theirs to use. It stays live for
 #: whoever it was issued to, and the sentence says why nothing happened.
+#: A rebind code typed by an account that already belongs to somebody else. The manager
+#: has to work out whose card this is; a fresh code would not answer that.
+ONBOARDING_ACCOUNT_TAKEN: Final = "Этот телеграм уже привязан к другому сотруднику."
+#: The card the code pointed at is gone or switched off.
+ONBOARDING_CARD_UNAVAILABLE: Final = "Карточка недоступна. Обратитесь к управляющему."
+#: TZ 5.1: the second side of a rebind confirms before anything moves.
+ONBOARDING_REBIND_CONFIRM_TEMPLATE: Final = (
+    "Это карточка {full_name} в «{venue}». Привязать её к этому телеграму?"
+)
+ONBOARDING_REBIND_DONE_TEMPLATE: Final = "Готово. Теперь «{venue}» открывается отсюда."
 ONBOARDING_CODE_ALREADY_MEMBER: Final = (
     "Вы уже в команде — код не понадобился. Роль меняет управляющий."
 )
@@ -56,6 +66,8 @@ ONBOARDING_CREATE_VENUE_OFFER: Final = "Заведения пока нет. Со
 ONBOARDING_CREATE_VENUE_BUTTON: Final = "Создать заведение"
 
 __all__ = [
+    "ONBOARDING_ACCOUNT_TAKEN",
+    "ONBOARDING_CARD_UNAVAILABLE",
     "ONBOARDING_CODE_ALREADY_MEMBER",
     "ONBOARDING_CODE_EXPIRED",
     "ONBOARDING_CODE_UNKNOWN",
@@ -70,6 +82,8 @@ __all__ = [
     "ONBOARDING_NAME_TOO_SHORT",
     "ONBOARDING_NO_ACCESS",
     "ONBOARDING_PICK_VENUE",
+    "ONBOARDING_REBIND_CONFIRM_TEMPLATE",
+    "ONBOARDING_REBIND_DONE_TEMPLATE",
     "ONBOARDING_WELCOME_BACK_TEMPLATE",
     "ONBOARDING_WELCOME_TEMPLATE",
 ]

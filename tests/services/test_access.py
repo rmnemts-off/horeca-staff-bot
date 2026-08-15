@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from src.db.models import InviteCode, MemberRole, User, Venue, VenueMember
+from src.db.models import InviteCode, InvitePurpose, MemberRole, User, Venue, VenueMember
 from src.services import access as access_module
 from src.services.access import (
     INVITE_CODE_ATTEMPTS,
@@ -286,12 +286,19 @@ class InviteStore:
         used_by: int | None = None,
         used_at: dt.datetime | None = None,
         revoked_at: dt.datetime | None = None,
+        purpose: InvitePurpose = InvitePurpose.JOIN,
+        issued_to_member_id: int | None = None,
     ) -> InviteCode:
+        # `purpose` defaults here exactly as it does in `InviteCodeRepo.create` and in the
+        # column's server default. A fake that left it `None` would make every code look
+        # like neither kind, and the guard that reads it would quietly stop guarding.
         invite = InviteCode(
             id=self._next_id,
             venue_id=venue_id,
             code=code,
             role=role,
+            purpose=purpose,
+            issued_to_member_id=issued_to_member_id,
             position=position,
             full_name=full_name,
             created_by=created_by,

@@ -21,7 +21,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Sequence
 
-from src.db.models import InviteCode, MemberRole
+from src.db.models import InviteCode, InvitePurpose, MemberRole
 from src.db.repositories.base import BaseRepository
 
 
@@ -58,8 +58,14 @@ class InviteCodeRepo(BaseRepository[InviteCode]):
         position: str | None = None,
         full_name: str | None = None,
         created_by: int | None = None,
+        purpose: InvitePurpose = InvitePurpose.JOIN,
+        issued_to_member_id: int | None = None,
     ) -> InviteCode:
-        """`full_name` is the manager's draft of the name (decision B8), not a fact yet."""
+        """`full_name` is the manager's draft of the name (decision B8), not a fact yet.
+
+        `purpose` and `issued_to_member_id` travel together and the table enforces it: a
+        `rebind` code names the card it will move, a `join` code names none.
+        """
         invite = InviteCode(
             venue_id=self.venue_id,
             code=code,
@@ -68,6 +74,8 @@ class InviteCodeRepo(BaseRepository[InviteCode]):
             position=position,
             full_name=full_name,
             created_by=created_by,
+            purpose=purpose,
+            issued_to_member_id=issued_to_member_id,
         )
         self.session.add(invite)
         await self.session.flush()

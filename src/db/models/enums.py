@@ -21,6 +21,20 @@ from collections.abc import Sequence
 from sqlalchemy import Enum as SAEnum
 
 
+class InvitePurpose(enum.StrEnum):
+    """What a code in `invite_codes` is for (TZ 5.1).
+
+    Two codes look identical to the person typing them and mean opposite things. `JOIN`
+    brings somebody new in and creates a membership. `REBIND` points at a card that already
+    exists and only changes the Telegram account that opens it — no row is created, and the
+    person's shifts, checklists and write-offs do not move, because they hang off `users.id`
+    and that is exactly what stays put.
+    """
+
+    JOIN = "join"
+    REBIND = "rebind"
+
+
 class MemberRole(enum.StrEnum):
     """TZ 2 and 4.1: role is bound to the pair telegram_id + venue_id."""
 
@@ -130,6 +144,7 @@ def pg_enum(enum_type: type[enum.StrEnum], name: str) -> SAEnum:
 
 
 member_role_enum = pg_enum(MemberRole, "bp_member_role")
+invite_purpose_enum = pg_enum(InvitePurpose, "bp_invite_purpose")
 shift_status_enum = pg_enum(ShiftStatus, "bp_shift_status")
 shift_source_enum = pg_enum(ShiftSource, "bp_shift_source")
 checklist_type_enum = pg_enum(ChecklistType, "bp_checklist_type")
@@ -142,6 +157,7 @@ supplier_channel_enum = pg_enum(SupplierChannel, "bp_supplier_channel")
 
 __all__ = [
     "ChecklistType",
+    "InvitePurpose",
     "MemberRole",
     "NotificationStatus",
     "OrderStatus",
@@ -152,6 +168,7 @@ __all__ = [
     "SupplierChannel",
     "Unit",
     "checklist_type_enum",
+    "invite_purpose_enum",
     "member_role_enum",
     "notification_status_enum",
     "order_status_enum",

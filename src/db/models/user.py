@@ -5,11 +5,24 @@ from __future__ import annotations
 import datetime as dt
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Index,
+    UniqueConstraint,
+    and_,
+    column,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.models.base import Base, CreatedAtMixin, IdMixin, VenueScopedMixin, fk
-from src.db.models.enums import MemberRole, member_role_enum
+from src.db.models.enums import (
+    InvitePurpose,
+    MemberRole,
+    invite_purpose_enum,
+    member_role_enum,
+)
 
 if TYPE_CHECKING:
     from src.db.models.venue import Venue
@@ -62,6 +75,18 @@ class InviteCode(IdMixin, VenueScopedMixin, CreatedAtMixin, Base):
     __tablename__ = "invite_codes"
 
     code: Mapped[str] = mapped_column(unique=True, nullable=False)
+    # What the code does when it is typed. `join` is the original behaviour and the default,
+    # so every code issued before this column existed keeps meaning what it meant.
+    purpose: Mapped[InvitePurpose] = mapped_column(
+        invite_purpose_enum,
+        nullable=False,
+        server_default=InvitePurpose.JOIN.value,
+    )
+    #: The card a `rebind` code points at. Null for a `join` code, and the CHECK below makes
+    #: the two impossible to mix up.
+    issued_to_member_id: Mapped[int | None] = fk(
+        "venue_members.id", ondelete="CASCADE", nullable=True
+    )
     role: Mapped[MemberRole] = mapped_column(member_role_enum, nullable=False)
     position: Mapped[str | None] = mapped_column(nullable=True)
     # Decision B8: the manager types the full name when issuing the code; the employee
@@ -74,3 +99,39 @@ class InviteCode(IdMixin, VenueScopedMixin, CreatedAtMixin, Base):
     used_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
     # Plan, task 15: a code can be revoked before it is used.
     revoked_at: Mapped[dt.datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        # A rebind code without a card, and a join code with one, are both nonsense — and
+        # both are the kind of nonsense that only shows up when somebody types the code.
+        CheckConstraint(
+            "(purpose = 'rebind') = (issued_to_member_id IS NOT NULL)",
+            name="rebind_target",
+        ),
+        # `_invite_rejection` reads both halves of "used"; the table is what keeps them from
+        # ever disagreeing.
+        CheckConstraint(
+            "(used_at IS NULL) = (used_by IS NULL)",
+            name="used_pair",
+        ),
+        # At most one live rebind code per card: two accounts racing for the same card would
+        # otherwise both be told to confirm, and the loser would silently lose their access.
+        Index(
+            "uq_invite_codes_open_rebind",
+            "issued_to_member_id",
+            unique=True,
+            postgresql_where=and_(
+                column("purpose", invite_purpose_enum) == InvitePurpose.REBIND,
+                column("used_at").is_(None),
+                column("revoked_at").is_(None),
+            ),
+        ),
+        # The «Ждут активации» block of the roster reads exactly this predicate.
+        Index(
+            "ix_invite_codes_venue_pending",
+            "venue_id",
+            postgresql_where=and_(
+                column("used_at").is_(None),
+                column("revoked_at").is_(None),
+            ),
+        ),
+    )

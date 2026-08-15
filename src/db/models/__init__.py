@@ -31,6 +31,7 @@ from src.db.models.checklist import (
 )
 from src.db.models.enums import (
     ChecklistType,
+    InvitePurpose,
     MemberRole,
     NotificationStatus,
     OrderStatus,
@@ -66,6 +67,7 @@ __all__ = [
     "IdMixin",
     "ImportJob",
     "InviteCode",
+    "InvitePurpose",
     "KnowledgeArticle",
     "LibraryScopedMixin",
     "MemberRole",

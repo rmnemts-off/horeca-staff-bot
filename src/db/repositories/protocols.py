@@ -33,6 +33,7 @@ from src.db.models import (
     ChecklistType,
     ImportJob,
     InviteCode,
+    InvitePurpose,
     KnowledgeArticle,
     MemberRole,
     Notification,
@@ -182,6 +183,8 @@ class InviteCodeRepository(Protocol):
         position: str | None = None,
         full_name: str | None = None,
         created_by: int | None = None,
+        purpose: InvitePurpose = InvitePurpose.JOIN,
+        issued_to_member_id: int | None = None,
     ) -> InviteCode: ...
 
     async def mark_used(
