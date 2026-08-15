@@ -21,7 +21,12 @@ the refusal happens before routing and the handler is never called.
   has never seen turn a code into a membership, so an update that carries one is let
   through with the parsed code in `data["invite_code"]`. Parsing is `parse_invite_code()`
   from the access service — the middleware recognises a code, it does not define what one
-  is (TZ 3.2: no business logic in middleware).
+  is (TZ 3.2: no business logic in middleware);
+* **a step of that scenario** — the confirmation buttons and the corrected name. Only the
+  first update of joining carries a code in its text; everything after it keeps the code in
+  the FSM state, so the gate asks `is_joining()` instead of reading the text again. Without
+  this the confirmation screen appeared and its buttons were refused, which closed TZ 5.1's
+  only road in to the only person it is for.
 
 Somebody whose membership was deactivated (TZ 5.1 keeps the row so the reports keep their
 history) has no active context, so the gate answers them exactly as it answers a stranger.
@@ -39,6 +44,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 from src.bot import texts
 from src.bot.middlewares.errors import inner_event
 from src.bot.middlewares.services import ACCESS_KEY
+from src.bot.states import is_joining
 from src.logging import get_logger
 from src.services.access import Identity, parse_invite_code
 
@@ -51,6 +57,9 @@ ACTOR_KEY: Final = "actor"
 
 #: Handler-context key holding the invite code an update carries, canonical form.
 INVITE_CODE_KEY: Final = "invite_code"
+
+#: Where aiogram's FSM middleware leaves the state of the scenario in progress.
+RAW_STATE_KEY: Final = "raw_state"
 
 #: The command a deep link arrives as: `t.me/<bot>?start=inv_XXXX` (TZ 5.1).
 START_COMMAND: Final = "/start"
@@ -122,7 +131,9 @@ class AuthMiddleware(BaseMiddleware):
         data[ACTOR_KEY] = identity.active
         data[INVITE_CODE_KEY] = invite
 
-        if self._may_pass(identity, invite):
+        # aiogram registers its own FSM middleware on `update` when the dispatcher is
+        # built, before this one, so the scenario in progress is already readable here.
+        if self._may_pass(identity, invite, data.get(RAW_STATE_KEY)):
             return await handler(event, data)
 
         logger.info("update refused: no membership", extra={"telegram_id": user.id})
@@ -130,12 +141,27 @@ class AuthMiddleware(BaseMiddleware):
         return None
 
     @staticmethod
-    def _may_pass(identity: Identity, invite: str | None) -> bool:
+    def _may_pass(identity: Identity, invite: str | None, raw_state: str | None = None) -> bool:
+        """Four ways in, and the fourth of them is not one update but a scenario.
+
+        The invite code is read out of the *text* of the update, and only the first step of
+        joining has any: the deep link, or the code typed into the chat. What follows — the
+        confirmation buttons and the corrected name — carries nothing a gate could
+        recognise, because a code may not travel in a `callback_data` and asking somebody
+        to retype it on every screen is not a product. So the person who had just been
+        shown their own name was refused on every button, and the road of TZ 5.1 ended one
+        press before it arrived.
+
+        `is_joining` grants nothing by itself: the state is aiogram's, keyed by bot, chat
+        and user, and the handler behind it still puts the code through
+        `activate_invite_code`, which is where a spent or forged one dies.
+        """
         return (
             identity.active is not None
             or identity.needs_venue_choice
             or identity.may_create_venue
             or invite is not None
+            or is_joining(raw_state)
         )
 
     @staticmethod

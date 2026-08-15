@@ -188,6 +188,37 @@ WIZARDS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: The one scenario a person walks through *before* they are anybody in the system (TZ 5.1).
+#:
+#: The gate in `src/bot/middlewares/auth.py` recognises an invite code by reading the text
+#: of the update, and only the *first* message of this scenario carries one — the deep link
+#: or the typed code. Every step after it holds the code in the state instead, because a
+#: code may not travel in a `callback_data` and retyping it is not something to ask of
+#: anybody.
+#:
+#: Without this set the gate let a stranger reach the confirmation screen and then refused
+#: the button on it: the invited owner was shown his own name, asked to confirm it, and
+#: told the action was unavailable — on that button and on every other one. The whole road
+#: in of TZ 5.1 was closed to the only person it is for, and no test saw it, because
+#: everybody who activated a code in testing was already a member or the bootstrap owner,
+#: and for both of those the gate opens on an earlier line.
+JOINING: Final[frozenset[str]] = frozenset({Onboarding.__name__})
+
+
+def is_joining(raw_state: str | None) -> bool:
+    """Is this update a step of somebody's way in (TZ 5.1)?
+
+    Being here grants nothing at all. The state is aiogram's own, keyed by bot, chat and
+    user, so it cannot be aimed at anybody else; and the handler behind it still hands the
+    code to `AccessService.activate_invite_code`, which decides for itself whether that
+    code exists, is live, and is not already spent. This only tells the gate to stop
+    treating the person as a stranger with nothing to say.
+    """
+    if raw_state is None:
+        return False
+    return raw_state.split(":", 1)[0] in JOINING
+
+
 def keeps_unsaved_input(raw_state: str | None) -> bool:
     """Whether dropping this scenario loses something the person typed (TZ 5.2).
 
@@ -203,6 +234,7 @@ def keeps_unsaved_input(raw_state: str | None) -> bool:
 
 
 __all__ = [
+    "JOINING",
     "WIZARDS",
     "ChecklistSkip",
     "InviteWizard",
@@ -213,5 +245,6 @@ __all__ = [
     "ShiftWizard",
     "TemplateEditor",
     "VenueWizard",
+    "is_joining",
     "keeps_unsaved_input",
 ]

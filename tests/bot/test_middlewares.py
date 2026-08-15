@@ -53,6 +53,7 @@ from src.bot.callbacks import (
     AdminSection,
     ChecklistToggle,
     EditorLine,
+    InviteConfirm,
     MemberShow,
     MenuAction,
     MenuKeep,
@@ -661,6 +662,90 @@ async def test_an_invite_code_gets_through_the_gate(text: str) -> None:
     assert handler.was_called
     assert handler.context[INVITE_CODE_KEY] == format_invite_code(VENUE_ID, "A7K9QX4M")
     assert not session_of(bot).calls, "the gate answers nothing when it lets an update through"
+
+
+async def test_the_confirmation_of_an_invite_reaches_the_handler() -> None:
+    """The whole of TZ 5.1 hangs on this press, and it was refused (bug of 15.08.2026).
+
+    An owner invited a colleague with a live code. The colleague opened the link, was
+    shown the name on the code and asked to confirm it — and every button on that
+    screen answered that the action was unavailable.
+
+    The reason is one line of arithmetic about types: the gate reads the invite code out of
+    `target.text`, and a `CallbackQuery` has no text. The code lives in the FSM state from
+    the second step onwards, so from the gate's point of view the presser was a stranger
+    with nothing to show. Nobody noticed because every code activated in testing belonged
+    to somebody who was already a member or the bootstrap owner — both of whom the gate
+    admits a line earlier.
+    """
+    bot = make_bot()
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_callback(
+            InviteConfirm(is_correct=True).pack(),
+            telegram_id=STRANGER_TELEGRAM_ID,
+            bot=bot,
+        ),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: "Onboarding:confirm"},
+    )
+
+    assert handler.was_called, "the button of the confirmation screen must reach its handler"
+    assert not session_of(bot).calls, "and the gate answers nothing when it lets one through"
+
+
+async def test_the_corrected_name_reaches_the_handler_too() -> None:
+    """«Поправить имя» leads to a typed message, which carries no code either."""
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_message("Иван Петров", telegram_id=STRANGER_TELEGRAM_ID),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: "Onboarding:name"},
+    )
+
+    assert handler.was_called
+
+
+async def test_only_the_joining_scenario_opens_the_gate() -> None:
+    """The exemption is one state group wide, and must not become a way past the gate.
+
+    A stranger sitting in any other scenario — or in none — is still a stranger; otherwise
+    a state left over from anywhere would be an entrance (TZ 5.1, TZ 9).
+    """
+    bot = make_bot()
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_callback(
+            InviteConfirm(is_correct=True).pack(),
+            telegram_id=STRANGER_TELEGRAM_ID,
+            bot=bot,
+        ),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: "TemplateEditor:bulk"},
+    )
+
+    assert not handler.was_called
+    assert [answer.text for answer in session_of(bot).answers()] == [texts.ERROR_NOT_ALLOWED]
+
+
+async def test_a_stranger_with_no_state_at_all_is_still_a_stranger() -> None:
+    bot = make_bot()
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_callback(
+            InviteConfirm(is_correct=True).pack(),
+            telegram_id=STRANGER_TELEGRAM_ID,
+            bot=bot,
+        ),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: None},
+    )
+
+    assert not handler.was_called
 
 
 async def test_a_bare_start_is_not_an_invite_code() -> None:
