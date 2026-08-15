@@ -909,3 +909,68 @@ async def test_an_operation_that_keeps_the_role_never_asks_about_owners(stand: S
     await stand.service.set_position(boss, hand.id, "бармен")
 
     assert stand.members.locked_counts == []
+
+
+# --------------------------------------------------------------------------------------
+# The card is edited on the server's terms, not the keyboard's (TZ 9)
+# --------------------------------------------------------------------------------------
+#
+# Found by review, not by these tests: `rename` and `set_position` checked only that the
+# actor was a manager. The card hid the buttons on somebody senior — and hiding is not
+# protection, because a forged `callback_data` never sees the keyboard. `rename` writes
+# `users.full_name`, which is global, so the reach went past this venue entirely.
+
+
+async def test_a_manager_does_not_rename_the_owner(stand: Stand) -> None:
+    boss = manager_of(stand)
+    user, chief = seed(stand, full_name="Olga", role=MemberRole.OWNER)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.rename(boss, chief.id, "Кто угодно")
+
+    assert user.full_name == "Olga"
+
+
+async def test_a_manager_does_not_rename_another_manager(stand: Stand) -> None:
+    boss = manager_of(stand)
+    user, peer = seed(stand, full_name="Nina", role=MemberRole.MANAGER)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.rename(boss, peer.id, "Кто угодно")
+
+    assert user.full_name == "Nina"
+
+
+async def test_a_manager_does_not_reword_the_owners_position(stand: Stand) -> None:
+    boss = manager_of(stand)
+    _, chief = seed(stand, full_name="Olga", role=MemberRole.OWNER, position="владелец")
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.set_position(boss, chief.id, "уборщик")
+
+    assert chief.position == "владелец"
+
+
+async def test_the_owner_still_renames_anybody(stand: Stand) -> None:
+    """The guard refuses one direction and must not seize up the ordinary case."""
+    boss = owner_of(stand)
+    user, peer = seed(stand, full_name="Nina", role=MemberRole.MANAGER)
+
+    await stand.service.rename(boss, peer.id, "Нина Петрова")
+
+    assert user.full_name == "Нина Петрова"
+
+
+async def test_the_owner_counter_is_scoped_to_the_venue(stand: Stand) -> None:
+    """The fake counts through the venue predicate — and now something says so.
+
+    Verified by mutation: replacing `self._scoped()` with `self.store.rows` inside
+    `count_active_by_role` fails this test and nothing else. Before it existed the predicate
+    was dead code in the fake: it could be deleted and the file stayed green.
+    """
+    boss = owner_of(stand)
+    alone = stand.members.rows[-1]
+    seed(stand, full_name="Чужой", role=MemberRole.OWNER, venue_id=OTHER_VENUE_ID)
+
+    with pytest.raises(LastOwnerError):
+        await stand.service._assert_owner_remains(boss, alone, new_active=False)

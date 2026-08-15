@@ -21,6 +21,8 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Sequence
 
+from sqlalchemy import update
+
 from src.db.models import InviteCode, InvitePurpose, MemberRole
 from src.db.repositories.base import BaseRepository
 
@@ -88,14 +90,29 @@ class InviteCodeRepo(BaseRepository[InviteCode]):
         used_by: int,
         used_at: dt.datetime,
     ) -> InviteCode | None:
-        """Spend the code. Single use is the service's check; this only records the fact."""
-        invite = await self._get(code_id)
-        if invite is None:
+        """Spend the code, and answer `None` if somebody else spent it first.
+
+        A conditional `UPDATE ... WHERE used_at IS NULL`, not a read-modify-write, and that
+        is the whole of "single use" (TZ 5.1). The service checks the code before calling
+        this, but between its check and this write there is a gap, and the two sides of it
+        are two different Telegram accounts: an invite link forwarded into a shift chat gets
+        opened by several people at once. Under READ COMMITTED both would see `used_at IS
+        NULL` and both would become members — one of them possibly a manager.
+        """
+        statement = (
+            update(InviteCode)
+            .where(InviteCode.id == code_id)
+            .where(InviteCode.venue_id == self.venue_id)
+            .where(InviteCode.used_at.is_(None))
+            .values(used_by=used_by, used_at=used_at)
+            .returning(InviteCode.id)
+        )
+        if (await self.session.scalars(statement)).first() is None:
             return None
-        invite.used_by = used_by
-        invite.used_at = used_at
+        # Re-read through the identity map so the caller gets the row it already holds,
+        # with the values the statement above wrote.
         await self.session.flush()
-        return invite
+        return await self._get(code_id)
 
     async def revoke(self, code_id: int, moment: dt.datetime) -> InviteCode | None:
         """Withdraw a code, keeping `expires_at` intact (plan, task 15)."""

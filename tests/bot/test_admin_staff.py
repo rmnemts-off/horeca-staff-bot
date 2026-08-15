@@ -44,6 +44,7 @@ from src.bot.callbacks import (
     MemberActive,
     MemberEdit,
     MemberField,
+    MemberRebind,
     MemberSetRole,
     MemberShow,
     OpenAdmin,
@@ -58,6 +59,7 @@ from src.bot.handlers.admin_staff import (
     invite_name,
     invite_position,
     open_staff,
+    rebind_member,
     revoke_code,
     router,
     set_member_active,
@@ -288,9 +290,26 @@ class FakeInvites:
         self.known_codes = {self.code.id}
         #: Codes nobody has used yet — what the roster screen lists under the people.
         self.pending = list(pending)
+        #: Cards a rebind code was issued for, in order.
+        self.rebound: list[int] = []
+        #: How many venues the person works in, for the warning of TZ 2 on that screen.
+        self.venues_of_person = 1
 
     async def list_pending_invite_codes(self, actor: AccessContext) -> Sequence[InviteCode]:
         return tuple(self.pending)
+
+    async def issue_rebind_code(
+        self,
+        actor: AccessContext,
+        *,
+        member_id: int,
+        now: dt.datetime,
+    ) -> InviteCode:
+        self.rebound.append(member_id)
+        return self.code
+
+    async def membership_count(self, user_id: int) -> int:
+        return self.venues_of_person
 
     async def issue_invite_code(
         self,
@@ -766,6 +785,11 @@ async def test_a_code_the_venue_does_not_own_is_refused_like_everything_else() -
         InviteRevoke(code_id=1),
         MemberShow(member_id=7),
         MemberActive(member_id=7, is_active=False),
+        # Added with the card of TZ 5.8. Two of the three change rights or move an account,
+        # and all three were outside this list when they were written (found by review).
+        MemberSetRole(member_id=7, role=MemberRole.MANAGER),
+        MemberEdit(member_id=7, field=MemberField.FULL_NAME),
+        MemberRebind(member_id=7),
     ],
     ids=lambda payload: type(payload).__name__,
 )
@@ -1041,3 +1065,47 @@ async def test_an_empty_line_asks_again_instead_of_saving_nothing() -> None:
 
     assert roster.calls == []
     assert await state.get_state() == MemberEditing.full_name.state
+
+
+async def test_the_rebind_screen_shows_the_code_and_both_warnings() -> None:
+    """TZ 5.1: the manager forwards this to the person's new account.
+
+    The handler had no test at all when it was written, which is how the card-editing
+    handlers next to it were caught missing their rank check (found by review).
+    """
+    bot = make_named_bot()
+    services, _ = staff_services(make_entry(7, full_name="Ivan Ivanov"))
+    access = FakeInvites()
+
+    await rebind_member(
+        make_callback(MemberRebind(member_id=7).pack(), bot=bot),
+        bot=bot,
+        actor=OWNER,
+        services=services,
+        access=access,
+        callback_payload=MemberRebind(member_id=7),
+    )
+
+    screen = str(edits_of(bot)[-1].text)
+    assert access.code.code in screen
+    assert texts.INVITE_REBIND_HINT in screen
+    assert access.rebound == [7]
+
+
+async def test_a_card_of_another_venue_is_not_rebound_from_here() -> None:
+    """Acceptance 11.3: the roster answers `None`, and the screen stops there."""
+    bot = make_named_bot()
+    services, _ = staff_services()
+    access = FakeInvites()
+
+    await rebind_member(
+        make_callback(MemberRebind(member_id=99).pack(), bot=bot),
+        bot=bot,
+        actor=OWNER,
+        services=services,
+        access=access,
+        callback_payload=MemberRebind(member_id=99),
+    )
+
+    assert access.rebound == []
+    assert [answer.text for answer in session_of(bot).answers()] == [texts.ERROR_NOT_ALLOWED]

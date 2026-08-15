@@ -1612,3 +1612,43 @@ async def test_a_button_of_the_scenario_itself_is_not_an_interruption() -> None:
     assert handler.was_called
     assert await state.get_state() == Wizard.name.state
     assert not session_of(bot).calls
+
+
+async def test_a_mistyped_code_does_not_open_the_gate_for_a_stranger() -> None:
+    """The exemption is two steps wide, not a whole scenario (found by review).
+
+    `_refuse_the_code` parks *anybody* who typed something wrong in `Onboarding.code`, so a
+    group-wide exemption meant one bad guess bought a stranger a day of passing the gate —
+    including with callbacks, which is exactly what the gate exists to stop.
+    """
+    bot = make_bot()
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_callback(
+            InviteConfirm(is_correct=True).pack(),
+            telegram_id=STRANGER_TELEGRAM_ID,
+            bot=bot,
+        ),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: "Onboarding:code"},
+    )
+
+    assert not handler.was_called
+    assert [answer.text for answer in session_of(bot).answers()] == [texts.ERROR_NOT_ALLOWED]
+
+
+async def test_typing_a_code_still_works_from_that_state() -> None:
+    """Nothing is lost by leaving `Onboarding.code` out: a typed code passes on its text."""
+    handler = Handler()
+
+    await AuthMiddleware()(
+        handler,
+        make_message(
+            format_invite_code(VENUE_ID, "A7K9QX4M"),
+            telegram_id=STRANGER_TELEGRAM_ID,
+        ),
+        {ACCESS_KEY: FakeAccess(), RAW_STATE_KEY: "Onboarding:code"},
+    )
+
+    assert handler.was_called

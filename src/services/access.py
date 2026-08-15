@@ -774,6 +774,7 @@ class AccessService:
             raise UnknownMembershipError(member_id, actor.venue_id)
         require_venue(actor, member.venue_id)
         require_outranks_target(actor, member)
+        await self._require_outranks_everywhere(actor, member)
 
         # The name travels on the code so that the *new* account can be shown whose card
         # it is about to take over. It is a copy for one screen and never written back.
@@ -797,6 +798,32 @@ class AccessService:
         raise InviteCodeGenerationError(
             f"could not draw a free invite code in {INVITE_CODE_ATTEMPTS} attempts"
         )
+
+    async def _require_outranks_everywhere(
+        self,
+        actor: AccessContext,
+        member: VenueMember,
+    ) -> None:
+        """The rank of a rebind target is decided across **all** their venues (TZ 3.3).
+
+        This operation is scoped to one venue and its effect is not: it writes
+        `users.telegram_id`, one row per person, so the account it hands over opens every
+        venue that person belongs to. Judging the target by their role *here* therefore
+        leaks: a bartender in this venue may be the owner of the one next door, and a
+        manager who may not touch their own owner would be handing themselves that one.
+
+        So the check is against the highest role the person holds anywhere. It reads only
+        through venue-scoped repositories, one venue at a time, exactly as `resolve` does —
+        no query here sees a membership without being told which venue to look in.
+        """
+        person = await self.repositories.users.get(member.user_id)
+        if person is None:
+            return
+        for context in await self._contexts_for(person):
+            if context.venue_id == actor.venue_id:
+                continue
+            if role_rank(context.role) >= role_rank(MemberRole.MANAGER):
+                require_owner(actor)
 
     async def activate_rebind_code(
         self,
@@ -841,23 +868,31 @@ class AccessService:
         )
         if member is None or not member.is_active:
             return RebindOutcome(rejection=InviteRejection.CARD_UNAVAILABLE, venue_id=venue_id)
+        if role_rank(member.role) > role_rank(found.role):
+            # The card was promoted after the code was issued. `found.role` is the snapshot
+            # the issuer was allowed to hand over; seven days is long enough for a bartender
+            # to become a manager, and a live code must not quietly grow with them.
+            return RebindOutcome(rejection=InviteRejection.CARD_UNAVAILABLE, venue_id=venue_id)
 
         users = self.repositories.users
         occupant = await users.get_by_telegram_id(telegram_id)
         if occupant is not None and occupant.id != member.user_id:
             return RebindOutcome(rejection=InviteRejection.ACCOUNT_TAKEN, venue_id=venue_id)
 
+        # Claim first: the account that loses the race must not move anything.
+        if await invites.mark_used(found.id, used_by=member.user_id, used_at=moment) is None:
+            return RebindOutcome(rejection=InviteRejection.ALREADY_USED, venue_id=venue_id)
+
         # Read the *value* before writing, not the row: `update` mutates the very object
-        # `get` handed back (one instance per id, in the identity map and in the fakes), so
-        # asking afterwards would answer with what was just written and the diff would come
-        # out empty. The audit entry would then silently not exist.
+        # `get` handed back, so asking afterwards would answer with what was just written.
         was = await users.get(member.user_id)
         before = None if was is None else was.telegram_id
         if occupant is None:
             await users.update(member.user_id, telegram_id=telegram_id, username=username)
-        await invites.mark_used(found.id, used_by=member.user_id, used_at=moment)
+        moved = await users.get(member.user_id)
         await self._record_rebind(
             venue_id,
+            actor=None if moved is None else _context(moved, member),
             member=member,
             before=before,
             after=telegram_id,
@@ -872,6 +907,7 @@ class AccessService:
         self,
         venue_id: int,
         *,
+        actor: AccessContext | None,
         member: VenueMember,
         before: int | None,
         after: int,
@@ -885,7 +921,7 @@ class AccessService:
         if trail.is_silent:
             return
         await trail.updated(
-            None,
+            actor,
             AuditEntity.MEMBER,
             member.id,
             before={"telegram_id": before},
@@ -1023,6 +1059,14 @@ class AccessService:
             full_name=full_name or (found.full_name or ""),
             username=username,
         )
+        # **Claim the code before writing the membership.** The check above and this line
+        # are separated by a gap, and the two sides of it are two different Telegram
+        # accounts: a link forwarded into a shift chat is opened by several people at once.
+        # Whoever loses the conditional UPDATE must leave no trace — a membership written
+        # first and disowned afterwards is a role somebody kept.
+        if await invites.mark_used(found.id, used_by=user.id, used_at=moment) is None:
+            return InviteActivation(rejection=InviteRejection.ALREADY_USED, venue_id=venue_id)
+
         existing = seated
         if existing is None:
             member = await members.add(
@@ -1047,7 +1091,6 @@ class AccessService:
             )
             member = updated if updated is not None else existing
 
-        await invites.mark_used(found.id, used_by=user.id, used_at=moment)
         if user.active_venue_id is None:
             await self.repositories.users.set_active_venue(user.id, venue_id)
         await self._record_activation(venue_id, user=user, member=member, code=found, at=moment)

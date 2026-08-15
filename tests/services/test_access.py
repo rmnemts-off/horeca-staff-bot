@@ -370,8 +370,13 @@ class FakeInvites:
         used_by: int,
         used_at: dt.datetime,
     ) -> InviteCode | None:
+        """Conditional, exactly like `InviteCodeRepo.mark_used`: a spent code answers None.
+
+        Reproduced and not simplified — this *is* the single-use guarantee of TZ 5.1, and a
+        fake that always succeeded would let the service stop checking the answer.
+        """
         row = next((row for row in self._scoped() if row.id == code_id), None)
-        if row is None:
+        if row is None or row.used_at is not None:
             return None
         row.used_by = used_by
         row.used_at = used_at
@@ -1765,3 +1770,101 @@ async def test_the_move_is_written_down(stand: Stand) -> None:
         if entry["entity"] == "venue_members" and entry["action"] == "update"
     )
     assert moved["diff"]["telegram_id"] == {"from": STAFF_TG, "to": NEW_TG}
+
+
+# --------------------------------------------------------------------------------------
+# What review found in the rebind, after it was written (TZ 3.3, 9)
+# --------------------------------------------------------------------------------------
+
+
+async def test_a_manager_cannot_rebind_somebody_who_runs_another_venue(stand: Stand) -> None:
+    """The operation is scoped to one venue and its effect is not (TZ 3.3).
+
+    It writes `users.telegram_id`, one row per person, so the account it hands over opens
+    *every* venue that person belongs to. A bartender here may be the owner next door, and
+    a manager who may not touch their own owner would be handing themselves that one.
+    """
+    user, _ = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    stand.members.add(venue_id=OTHER_VENUE_ID, user_id=user.id, role=MemberRole.OWNER)
+    here = next(row for row in stand.members.rows if row.venue_id == VENUE_ID)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.issue_rebind_code(MANAGER, member_id=here.id, now=NOW)
+
+
+async def test_the_owner_may_still_rebind_them(stand: Stand) -> None:
+    """The rule is about rank, not about forbidding the operation."""
+    user, _ = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    stand.members.add(venue_id=OTHER_VENUE_ID, user_id=user.id, role=MemberRole.OWNER)
+    here = next(row for row in stand.members.rows if row.venue_id == VENUE_ID)
+
+    code = await stand.service.issue_rebind_code(OWNER, member_id=here.id, now=NOW)
+
+    assert code.purpose is InvitePurpose.REBIND
+
+
+async def test_a_card_promoted_after_the_code_was_issued_no_longer_opens_it(
+    stand: Stand,
+) -> None:
+    """TOCTOU: the rank was checked when the code was issued, and a code lives seven days.
+
+    Long enough for the owner to promote that same person, which would turn a live code the
+    manager is holding into a way into a manager's card.
+    """
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(MANAGER, member_id=member.id, now=NOW)
+    member.role = MemberRole.MANAGER
+
+    outcome = await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    assert outcome.rejection is InviteRejection.CARD_UNAVAILABLE
+
+
+async def test_only_one_account_wins_a_code_two_people_opened(stand: Stand) -> None:
+    """TZ 5.1 says single use, and that is the only bound on handing out roles by code.
+
+    The link goes into a shift chat and two people open it. Before the claim was a
+    conditional write, both read `used_at IS NULL` and both became members — one of them
+    possibly a manager.
+    """
+    code = seed_code(stand, role=MemberRole.MANAGER)
+
+    first = await stand.service.activate_invite_code(
+        code.code, telegram_id=STAFF_TG, full_name="Первый", now=NOW
+    )
+    second = await stand.service.activate_invite_code(
+        code.code, telegram_id=NEW_TG, full_name="Второй", now=NOW
+    )
+
+    assert first.is_activated is True
+    assert second.rejection is InviteRejection.ALREADY_USED
+    assert len([row for row in stand.members.rows if row.venue_id == VENUE_ID]) == 1
+
+
+async def test_the_loser_of_the_race_leaves_no_membership_behind(stand: Stand) -> None:
+    """The claim comes before the write, so losing it writes nothing at all."""
+    code = seed_code(stand)
+    code.used_at = NOW
+    code.used_by = 999
+
+    activation = await stand.service.activate_invite_code(
+        code.code, telegram_id=NEW_TG, full_name="Опоздавший", now=NOW
+    )
+
+    assert activation.rejection is InviteRejection.ALREADY_USED
+    assert stand.members.rows == []
+
+
+async def test_the_move_is_attributed_to_the_person_whose_card_moved(stand: Stand) -> None:
+    """TZ 2: `telegram_id` is the key to somebody's access, so the row names an actor."""
+    user, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(OWNER, member_id=member.id, now=NOW)
+
+    await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    moved = next(
+        entry
+        for entry in stand.audit.entries(VENUE_ID)
+        if entry["entity"] == "venue_members" and entry["action"] == "update"
+    )
+    assert moved["user_id"] == user.id

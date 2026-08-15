@@ -239,7 +239,8 @@ class MemberService:
     ) -> RosterEntry:
         """Bartender / waiter / cook — free text, the venue names its own positions."""
         require_manager(actor)
-        await self._require_member(actor, member_id)
+        current = await self._require_member(actor, member_id)
+        require_outranks_target(actor, current)
         return await self._update(actor, member_id, position=position)
 
     async def rename(
@@ -256,6 +257,11 @@ class MemberService:
         require_manager(actor)
         member = await self._require_member(actor, member_id)
         require_venue(actor, member.venue_id)
+        # A manager does not rewrite a manager's or the owner's card, and `users.full_name`
+        # is global — the new name would follow the person into every venue they work in,
+        # including ones this actor has nothing to do with. The card hides the button, and
+        # hiding is not the protection (TZ 9): a forged `callback_data` arrives here.
+        require_outranks_target(actor, member)
         cleaned = full_name.strip()
         if not cleaned:
             raise MemberError("the full name cannot be empty")

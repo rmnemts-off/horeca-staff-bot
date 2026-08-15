@@ -402,3 +402,47 @@ async def test_revocation_keeps_the_expiry(session: AsyncSession) -> None:
     assert revoked is not None
     assert revoked.revoked_at == MOMENT
     assert revoked.expires_at == expires_at
+
+
+async def test_a_code_can_only_be_spent_once(session: AsyncSession) -> None:
+    """TZ 5.1: single use, and this is the statement that guarantees it.
+
+    Against the real database on purpose. The service tests run on a fake, and a fake that
+    agrees with a broken repository is the exact failure this project has a rule about:
+    dropping `WHERE used_at IS NULL` from `mark_used` leaves every one of them green, and
+    only this test goes red.
+
+    The scenario is not exotic. A manager forwards an invite link into the shift chat and
+    two people open it; before the claim became conditional, both read `used_at IS NULL`
+    and both became members — one of them possibly a manager.
+    """
+    venue = await create_venue(session)
+    first: User = await create_user(session)
+    second: User = await create_user(session)
+    repo = InviteCodeRepo(session, venue.id)
+    created = await repo.create(
+        code=unique_code(),
+        role=MemberRole.MANAGER,
+        expires_at=MOMENT + dt.timedelta(days=7),
+    )
+
+    won = await repo.mark_used(created.id, used_by=first.id, used_at=MOMENT)
+    lost = await repo.mark_used(created.id, used_by=second.id, used_at=MOMENT)
+
+    assert won is not None
+    assert lost is None, "the second claim finds nothing left to claim"
+    assert won.used_by == first.id
+
+
+async def test_a_code_of_another_venue_cannot_be_spent(session: AsyncSession) -> None:
+    """Acceptance 11.3: the claim carries the venue predicate like every other statement."""
+    first, second = await two_venues(session)
+    foreign = await create_invite_code(session, second)
+    spender: User = await create_user(session)
+
+    claimed = await InviteCodeRepo(session, first.id).mark_used(
+        foreign.id, used_by=spender.id, used_at=MOMENT
+    )
+
+    assert claimed is None
+    assert foreign.used_at is None

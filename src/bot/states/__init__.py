@@ -216,7 +216,17 @@ WIZARDS: Final[frozenset[str]] = frozenset(
 #: in of TZ 5.1 was closed to the only person it is for, and no test saw it, because
 #: everybody who activated a code in testing was already a member or the bootstrap owner,
 #: and for both of those the gate opens on an earlier line.
-JOINING: Final[frozenset[str]] = frozenset({Onboarding.__name__})
+#: **Steps, not the whole group.** `Onboarding.code` is deliberately absent: it is where
+#: `_refuse_the_code` parks *anybody* who typed something that was not a live code, and a
+#: stranger who mistypes once would otherwise hold the gate open for a day. Nothing is lost
+#: by leaving it out — a typed code passes the gate on its own text, which is what put the
+#: person into this scenario in the first place.
+JOINING: Final[frozenset[str]] = frozenset(
+    {
+        str(Onboarding.confirm.state),
+        str(Onboarding.name.state),
+    }
+)
 
 
 def is_joining(raw_state: str | None) -> bool:
@@ -228,9 +238,7 @@ def is_joining(raw_state: str | None) -> bool:
     code exists, is live, and is not already spent. This only tells the gate to stop
     treating the person as a stranger with nothing to say.
     """
-    if raw_state is None:
-        return False
-    return raw_state.split(":", 1)[0] in JOINING
+    return raw_state is not None and raw_state in JOINING
 
 
 def keeps_unsaved_input(raw_state: str | None) -> bool:
