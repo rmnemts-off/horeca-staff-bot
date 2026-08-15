@@ -793,7 +793,7 @@ async def test_a_manager_gets_through_to_the_section() -> None:
 def test_the_router_is_named_and_registers_the_screens() -> None:
     instance = router()
     assert instance.name == "admin_staff"
-    assert len(instance.callback_query.handlers) == 10
+    assert len(instance.callback_query.handlers) == 11
     assert len(instance.message.handlers) == 3
 
 

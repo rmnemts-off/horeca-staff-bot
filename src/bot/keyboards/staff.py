@@ -41,6 +41,7 @@ from src.bot.callbacks import (
     MemberActive,
     MemberEdit,
     MemberField,
+    MemberRebind,
     MemberSetRole,
     MemberShow,
     MenuAction,
@@ -209,6 +210,18 @@ def edit_button(entry: RosterEntry, field: MemberField, caption: str) -> InlineK
     )
 
 
+def rebind_button(entry: RosterEntry) -> InlineKeyboardButton:
+    """Point this card at another Telegram account (TZ 5.1).
+
+    On the card and not on the roster: it names one person, and the manager has to be
+    looking at the person before deciding that this is the one who changed accounts.
+    """
+    return InlineKeyboardButton(
+        text=texts.STAFF_REBIND_BUTTON,
+        callback_data=MemberRebind(member_id=entry.member_id).pack(),
+    )
+
+
 def member_keyboard(entry: RosterEntry, *, actor: AccessContext) -> InlineKeyboardMarkup:
     """One employee's card: switch them off or back on, and return to the list.
 
@@ -229,6 +242,7 @@ def member_keyboard(entry: RosterEntry, *, actor: AccessContext) -> InlineKeyboa
                 edit_button(entry, MemberField.POSITION, texts.STAFF_POSITION_BUTTON),
             ]
         )
+        rows.append([rebind_button(entry)])
     rows.append([back_to_roster()])
     return submenu(*rows, back=False)
 

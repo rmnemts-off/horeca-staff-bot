@@ -50,7 +50,7 @@ from src.bot.middlewares.resolver import PAYLOAD_KEY, Refusal, resolve
 from src.bot.middlewares.services import ACCESS_KEY
 from src.bot.states import Onboarding
 from src.bot.views import onboarding as views
-from src.db.models import MemberRole, User, VenueMember
+from src.db.models import InvitePurpose, MemberRole, User, VenueMember
 from src.services.access import (
     AccessContext,
     Identity,
@@ -327,6 +327,9 @@ async def test_the_confirmation_keeps_the_code_in_the_state_and_not_in_the_butto
     assert await at.state.get_data() == {
         handlers.CODE_FIELD: CODE,
         handlers.NAME_FIELD: RECORDED_NAME,
+        # Which kind of code is waiting: joining, or taking over an existing card. The
+        # «Да» button means two different things and has to know which one (TZ 5.1).
+        handlers.PURPOSE_FIELD: InvitePurpose.JOIN.value,
     }
     assert all(CODE not in payload for payload in payloads_of(sends(at.bot)[0].reply_markup))
 

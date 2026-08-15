@@ -52,7 +52,8 @@ from src.bot.safe_edit import safe_edit
 from src.bot.states import Onboarding
 from src.bot.views import Screen
 from src.bot.views import onboarding as views
-from src.db.models import MemberRole
+from src.bot.views import staff as staff_views
+from src.db.models import InvitePurpose, MemberRole
 from src.services.access import (
     AccessContext,
     AccessError,
@@ -71,6 +72,9 @@ BOT_KEY: Final = "bot"
 #: The code being activated, kept in the FSM state because it is text: rule 2 of
 #: `src/bot/callbacks.py` refuses free text in a button, and a code is nothing else.
 CODE_FIELD: Final = "invite_code"
+
+#: Which kind of code is waiting in the state: joining, or taking over a card (TZ 5.1).
+PURPOSE_FIELD: Final = "purpose"
 
 #: The name the code carries, so that the yes button need not read the code a second time.
 NAME_FIELD: Final = "full_name"
@@ -194,6 +198,21 @@ async def confirm(callback: CallbackQuery, **data: Any) -> None:
         await _edit(bot, callback, screen_at, views.name_prompt())
         return
 
+    if stored.get(PURPOSE_FIELD) == InvitePurpose.REBIND.value:
+        await _edit(
+            bot,
+            callback,
+            screen_at,
+            await _rebind(
+                access=data[ACCESS_KEY],
+                state=state,
+                code=code,
+                telegram_id=callback.from_user.id,
+                username=callback.from_user.username,
+            ),
+        )
+        return
+
     stored_name = stored.get(NAME_FIELD)
     screen, role = await _join(
         access=data[ACCESS_KEY],
@@ -208,6 +227,38 @@ async def confirm(callback: CallbackQuery, **data: Any) -> None:
         # The permanent keyboard of TZ 5.2 is a reply keyboard, and a reply keyboard cannot
         # be attached to an edit — it arrives with the one message this screen sends.
         await bot.send_message(chat_id, texts.MENU_PROMPT, reply_markup=main_menu(role))
+
+
+async def _rebind(
+    *,
+    access: AccessService,
+    state: FSMContext,
+    code: str,
+    telegram_id: int,
+    username: str | None,
+) -> Screen:
+    """Move the card to this account, or say why it did not move (TZ 5.1).
+
+    No menu follows a success on purpose: the person is now this employee, and the next
+    thing they press draws their own menu with their own role. Sending one here would mean
+    resolving an identity that was created one line ago.
+    """
+    outcome = await access.activate_rebind_code(
+        code,
+        telegram_id=telegram_id,
+        now=utc_now(),
+        username=username,
+    )
+    if outcome.rejection is not None:
+        await state.set_state(Onboarding.code)
+        return views.invite_rejected(outcome.rejection)
+    await state.clear()
+    venue = (
+        None
+        if outcome.venue_id is None
+        else (await access.venue_names([outcome.venue_id])).get(outcome.venue_id)
+    )
+    return views.rebound(venue=venue or "")
 
 
 async def named(message: Message, **data: Any) -> None:
@@ -304,7 +355,18 @@ async def _offer_the_code(message: Message, *, code: str, **data: Any) -> None:
     suggested = preview.suggested_full_name
     # `set_data`, not `update_data`: a second code replaces the first one entirely, and a
     # name left over from the previous attempt is exactly the wrong thing to keep.
-    await state.set_data({CODE_FIELD: code, NAME_FIELD: suggested or ""})
+    await state.set_data(
+        {CODE_FIELD: code, NAME_FIELD: suggested or "", PURPOSE_FIELD: preview.purpose.value}
+    )
+    if preview.purpose is InvitePurpose.REBIND:
+        # A different question entirely: this account is not joining, it is taking over a
+        # card that already exists (TZ 5.1). There is no name to correct — the card has one.
+        await state.set_state(Onboarding.confirm)
+        await _send(
+            message,
+            staff_views.rebind_confirm_screen(full_name=suggested or "", venue=venue),
+        )
+        return
     if suggested:
         await state.set_state(Onboarding.confirm)
         screen = views.invite_confirmation(

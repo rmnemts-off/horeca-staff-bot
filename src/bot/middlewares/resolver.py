@@ -65,6 +65,7 @@ from src.bot.callbacks import (
     MalformedCallbackError,
     MemberActive,
     MemberEdit,
+    MemberRebind,
     MemberSetRole,
     MemberShow,
     MenuKeep,
@@ -410,6 +411,10 @@ RULES: Final[Mapping[type[Callback], Rule]] = {
         subject=Subject(VenueMember, "member_id", load_member, OWN),
     ),
     MemberEdit: Rule(
+        minimum_role=MemberRole.MANAGER,
+        subject=Subject(VenueMember, "member_id", load_member, OWN),
+    ),
+    MemberRebind: Rule(
         minimum_role=MemberRole.MANAGER,
         subject=Subject(VenueMember, "member_id", load_member, OWN),
     ),

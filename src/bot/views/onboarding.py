@@ -131,6 +131,16 @@ def activated(*, full_name: str, venue: str) -> Screen:
     )
 
 
+def rebound(*, venue: str) -> Screen:
+    """The card now opens from this account (TZ 5.1).
+
+    No keyboard: the menu belongs to the next press, which will resolve this account into
+    the employee it has just become. Drawing one here would mean resolving an identity that
+    was created a line ago.
+    """
+    return Screen(text=texts.ONBOARDING_REBIND_DONE_TEMPLATE.format(venue=quoted(venue)))
+
+
 def welcomed_back(*, full_name: str, venue: str) -> Screen:
     """The same moment for somebody whose row was here all along (TZ 5.1).
 
@@ -178,6 +188,7 @@ __all__ = [
     "invite_rejected",
     "name_prompt",
     "name_too_short",
+    "rebound",
     "venue_choice",
     "venue_missing",
     "welcomed_back",

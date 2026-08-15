@@ -76,6 +76,14 @@ STAFF_RENAME_BUTTON: Final = "Имя"
 STAFF_POSITION_BUTTON: Final = "Должность"
 STAFF_RENAME_PROMPT: Final = "Как записать сотрудника?"
 STAFF_POSITION_PROMPT: Final = "Какая должность? Можно пропустить."
+#: TZ 5.1: the person changed their Telegram account and needs their own card back.
+STAFF_REBIND_BUTTON: Final = "Сменить телеграм"
+INVITE_REBIND_READY_TEMPLATE: Final = (
+    "Код для нового телеграма {full_name}: <code>{code}</code>\nСсылка: {link}"
+)
+INVITE_REBIND_HINT: Final = "Старый телеграм потеряет доступ. Смены и чек-листы останутся."
+#: `telegram_id` is global, so the change reaches every venue this person works in.
+INVITE_REBIND_MULTI_VENUE_TEMPLATE: Final = "Сотрудник работает ещё в {count} заведении."
 
 #: Decision B8: the manager types the full name when issuing the code.
 INVITE_NAME_PROMPT: Final = "Имя и фамилия сотрудника?"
@@ -249,6 +257,9 @@ __all__ = [
     "INVITE_NAME_PROMPT",
     "INVITE_POSITION_PROMPT",
     "INVITE_READY_TEMPLATE",
+    "INVITE_REBIND_HINT",
+    "INVITE_REBIND_MULTI_VENUE_TEMPLATE",
+    "INVITE_REBIND_READY_TEMPLATE",
     "INVITE_REVOKED",
     "INVITE_REVOKE_BUTTON",
     "INVITE_ROLE_PROMPT",
@@ -292,6 +303,7 @@ __all__ = [
     "STAFF_PENDING_TITLE",
     "STAFF_POSITION_BUTTON",
     "STAFF_POSITION_PROMPT",
+    "STAFF_REBIND_BUTTON",
     "STAFF_RENAME_BUTTON",
     "STAFF_RENAME_PROMPT",
     "STAFF_ROLE_CHANGED_TEMPLATE",

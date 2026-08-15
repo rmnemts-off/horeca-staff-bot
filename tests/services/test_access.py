@@ -58,6 +58,8 @@ OTHER_VENUE_ID = 2
 STAFF_TG = 917_323_199  # answer A1: the test bartender
 MANAGER_TG = 1_672_818_749  # answer A1: the test owner
 NEWCOMER_TG = 555_000_111
+#: The account a card is moved *to* — nobody the bot has seen before.
+NEW_TG = 777_000_222
 BOOTSTRAP_TG = 4_242_424
 
 NOW = dt.datetime(2026, 8, 13, 9, 0, tzinfo=dt.UTC)
@@ -346,6 +348,8 @@ class FakeInvites:
         position: str | None = None,
         full_name: str | None = None,
         created_by: int | None = None,
+        purpose: InvitePurpose = InvitePurpose.JOIN,
+        issued_to_member_id: int | None = None,
     ) -> InviteCode:
         return self.store.add(
             venue_id=self.venue_id,
@@ -353,6 +357,8 @@ class FakeInvites:
             role=role,
             expires_at=expires_at,
             position=position,
+            purpose=purpose,
+            issued_to_member_id=issued_to_member_id,
             full_name=full_name,
             created_by=created_by,
         )
@@ -1623,3 +1629,139 @@ async def test_the_trail_of_one_venue_does_not_land_in_another(stand: Stand) -> 
 
     assert stand.audit.entries(VENUE_ID) == []
     assert len(stand.audit.entries(OTHER_VENUE_ID)) == 2
+
+
+# --------------------------------------------------------------------------------------
+# Rebinding a card to another Telegram account (TZ 5.1)
+# --------------------------------------------------------------------------------------
+#
+# The gap this closes: somebody changes their Telegram account. An ordinary invite created a
+# *second* `users` row and a second membership — two identical names in the roster — and
+# every shift, checklist and write-off stayed on the first one, because they hang off
+# `users.id`. Moving `telegram_id` instead means the history never moves at all.
+
+
+def seed_rebind_code(stand: Stand, member: VenueMember, **kwargs: Any) -> InviteCode:
+    return seed_code(
+        stand,
+        purpose=InvitePurpose.REBIND,
+        issued_to_member_id=member.id,
+        **kwargs,
+    )
+
+
+async def test_rebinding_moves_the_account_and_nothing_else(stand: Stand) -> None:
+    boss = OWNER
+    user, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.MANAGER)
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+
+    outcome = await stand.service.activate_rebind_code(
+        code.code,
+        telegram_id=NEW_TG,
+        now=NOW,
+    )
+
+    assert outcome.is_rebound
+    assert user.telegram_id == NEW_TG, "the account moved"
+    assert user.id == member.user_id, "and the person did not"
+    assert member.role is MemberRole.MANAGER
+    assert len(stand.members.rows) == 1, "no second membership appeared"
+
+
+async def test_the_old_account_stops_opening_the_card(stand: Stand) -> None:
+    """The point of moving `telegram_id`: a lost or stolen account loses access."""
+    boss = OWNER
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+
+    await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+    identity = await stand.service.resolve(STAFF_TG)
+
+    assert identity.contexts == ()
+
+
+async def test_an_account_that_is_somebody_else_is_refused_and_the_code_survives(
+    stand: Stand,
+) -> None:
+    """Whose card is this? The manager has to answer that, not receive a fresh code."""
+    boss = OWNER
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    seed_member(stand, telegram_id=NEW_TG, role=MemberRole.STAFF, full_name="Другой")
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+
+    outcome = await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    assert outcome.rejection is InviteRejection.ACCOUNT_TAKEN
+    assert code.used_at is None, "the manager still has a live code to work with"
+
+
+async def test_a_switched_off_card_has_nothing_to_point_at(stand: Stand) -> None:
+    boss = OWNER
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+    member.is_active = False
+
+    outcome = await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    assert outcome.rejection is InviteRejection.CARD_UNAVAILABLE
+    assert code.used_at is None
+
+
+async def test_a_joining_code_is_not_a_rebind_code(stand: Stand) -> None:
+    """The two are told apart by the column and never by what they look like."""
+    code = seed_code(stand)
+
+    outcome = await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    assert outcome.rejection is InviteRejection.UNKNOWN
+
+
+async def test_a_rebind_code_is_not_a_joining_code(stand: Stand) -> None:
+    boss = OWNER
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+
+    activation = await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=NEW_TG,
+        full_name="Кто-то",
+        now=NOW,
+    )
+
+    assert activation.is_activated is False
+
+
+async def test_a_manager_does_not_move_the_owners_account(stand: Stand) -> None:
+    """TZ 2: taking over the owner's card is the owner's business."""
+    manager = MANAGER
+    _, chief = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.OWNER)
+
+    with pytest.raises(PermissionDeniedError):
+        await stand.service.issue_rebind_code(manager, member_id=chief.id, now=NOW)
+
+
+async def test_a_card_of_another_venue_cannot_be_rebound(stand: Stand) -> None:
+    """Acceptance 11.3: a forged id dies on the scope before anything else looks at it."""
+    boss = OWNER
+    _, theirs = seed_member(
+        stand, telegram_id=STAFF_TG, role=MemberRole.STAFF, venue_id=OTHER_VENUE_ID
+    )
+
+    with pytest.raises(UnknownMembershipError):
+        await stand.service.issue_rebind_code(boss, member_id=theirs.id, now=NOW)
+
+
+async def test_the_move_is_written_down(stand: Stand) -> None:
+    """TZ 2 and TZ 9: `telegram_id` is the key to somebody's access, so a move is logged."""
+    boss = OWNER
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = await stand.service.issue_rebind_code(boss, member_id=member.id, now=NOW)
+
+    await stand.service.activate_rebind_code(code.code, telegram_id=NEW_TG, now=NOW)
+
+    moved = next(
+        entry
+        for entry in stand.audit.entries(VENUE_ID)
+        if entry["entity"] == "venue_members" and entry["action"] == "update"
+    )
+    assert moved["diff"]["telegram_id"] == {"from": STAFF_TG, "to": NEW_TG}

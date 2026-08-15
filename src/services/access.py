@@ -742,6 +742,10 @@ class AccessService:
         require_manager(actor)
         return await self.repositories.invites(actor.venue_id).list_pending()
 
+    async def membership_count(self, user_id: int) -> int:
+        """In how many venues this person works — the warning of TZ 2 on the rebind screen."""
+        return len(await self.repositories.venues.list_for_user(user_id))
+
     async def issue_rebind_code(
         self,
         actor: AccessContext,
@@ -771,6 +775,9 @@ class AccessService:
         require_venue(actor, member.venue_id)
         require_outranks_target(actor, member)
 
+        # The name travels on the code so that the *new* account can be shown whose card
+        # it is about to take over. It is a copy for one screen and never written back.
+        owner_of_card = await self.repositories.users.get(member.user_id)
         moment = as_utc(now)
         invites = self.repositories.invites(actor.venue_id)
         for _ in range(INVITE_CODE_ATTEMPTS):
@@ -782,6 +789,7 @@ class AccessService:
                 role=member.role,
                 expires_at=moment + INVITE_CODE_TTL,
                 position=member.position,
+                full_name=None if owner_of_card is None else owner_of_card.full_name,
                 created_by=actor.user_id,
                 purpose=InvitePurpose.REBIND,
                 issued_to_member_id=member.id,
@@ -839,14 +847,19 @@ class AccessService:
         if occupant is not None and occupant.id != member.user_id:
             return RebindOutcome(rejection=InviteRejection.ACCOUNT_TAKEN, venue_id=venue_id)
 
-        before = await users.get(member.user_id)
+        # Read the *value* before writing, not the row: `update` mutates the very object
+        # `get` handed back (one instance per id, in the identity map and in the fakes), so
+        # asking afterwards would answer with what was just written and the diff would come
+        # out empty. The audit entry would then silently not exist.
+        was = await users.get(member.user_id)
+        before = None if was is None else was.telegram_id
         if occupant is None:
             await users.update(member.user_id, telegram_id=telegram_id, username=username)
         await invites.mark_used(found.id, used_by=member.user_id, used_at=moment)
         await self._record_rebind(
             venue_id,
             member=member,
-            before=None if before is None else before.telegram_id,
+            before=before,
             after=telegram_id,
         )
         return RebindOutcome(
@@ -988,7 +1001,10 @@ class AccessService:
 
         invites = self.repositories.invites(venue_id)
         found = await invites.get_by_code(code)
-        if found is None:
+        if found is None or found.purpose is InvitePurpose.REBIND:
+            # A rebind code names a card that already exists; joining on it would create a
+            # membership for the wrong person and spend somebody's way back into their own.
+            # Answered as unknown, so that trying codes cannot tell the two kinds apart.
             return InviteActivation(rejection=InviteRejection.UNKNOWN)
         rejection = _invite_rejection(found, moment)
         if rejection is not None:

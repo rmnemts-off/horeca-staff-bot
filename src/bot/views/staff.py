@@ -23,6 +23,7 @@ from typing import Final
 
 from src.bot import texts
 from src.bot.callbacks import MemberField
+from src.bot.keyboards.onboarding import invite_confirmation
 from src.bot.keyboards.staff import (
     code_keyboard,
     member_edit_keyboard,
@@ -169,6 +170,41 @@ def invite_code_screen(*, full_name: str, code: str, link: str, code_id: int) ->
     )
 
 
+def rebind_code_screen(
+    *,
+    full_name: str,
+    code: str,
+    link: str,
+    code_id: int,
+    other_venues: int = 0,
+) -> Screen:
+    """The code that moves a card to another account (TZ 5.1).
+
+    Two warnings, both of them things the manager cannot see for themselves: the old
+    account stops working, and — because `telegram_id` is one per person, not per venue —
+    the change reaches every other venue this employee works in (TZ 2).
+    """
+    lines = [
+        texts.INVITE_REBIND_READY_TEMPLATE.format(
+            full_name=quoted(full_name), code=quoted(code), link=quoted(link)
+        ),
+        texts.INVITE_REBIND_HINT,
+    ]
+    if other_venues:
+        lines.append(texts.INVITE_REBIND_MULTI_VENUE_TEMPLATE.format(count=other_venues))
+    return Screen(text="\n".join(lines), markup=code_keyboard(code_id))
+
+
+def rebind_confirm_screen(*, full_name: str, venue: str) -> Screen:
+    """What the *new* account is asked before anything moves (TZ 5.1, 8.2)."""
+    return Screen(
+        text=texts.ONBOARDING_REBIND_CONFIRM_TEMPLATE.format(
+            full_name=quoted(full_name), venue=quoted(venue)
+        ),
+        markup=invite_confirmation(),
+    )
+
+
 def invite_revoked_screen() -> Screen:
     """A withdrawn code: nothing to press on it any more but the way back (TZ 8.1)."""
     return Screen(text=texts.INVITE_REVOKED, markup=revoked_keyboard())
@@ -185,6 +221,8 @@ __all__ = [
     "invite_role_screen",
     "member_edit_screen",
     "member_screen",
+    "rebind_code_screen",
+    "rebind_confirm_screen",
     "roster_line",
     "roster_screen",
 ]

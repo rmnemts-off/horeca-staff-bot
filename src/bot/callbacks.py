@@ -483,6 +483,12 @@ class MemberEdit(Callback, prefix="me"):
     field: MemberField
 
 
+class MemberRebind(Callback, prefix="mb"):
+    """Issue a code that points this card at another Telegram account (TZ 5.1)."""
+
+    member_id: int
+
+
 class InviteRole(Callback, prefix="ir"):
     """The role an invite code carries (TZ 5.1: code, venue, role and position)."""
 
@@ -736,6 +742,7 @@ __all__ = [
     "MemberActive",
     "MemberEdit",
     "MemberField",
+    "MemberRebind",
     "MemberSetRole",
     "MemberShow",
     "MenuAction",

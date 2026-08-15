@@ -56,6 +56,7 @@ from src.bot.callbacks import (
     MemberActive,
     MemberEdit,
     MemberField,
+    MemberRebind,
     MemberSetRole,
     MemberShow,
     OpenAdmin,
@@ -72,6 +73,7 @@ from src.bot.views.staff import (
     invite_role_screen,
     member_edit_screen,
     member_screen,
+    rebind_code_screen,
     roster_screen,
 )
 from src.db.models import InviteCode, MemberRole, Venue
@@ -158,6 +160,16 @@ class Invites(Protocol):
     ) -> InviteCode | None: ...
 
     async def list_pending_invite_codes(self, actor: AccessContext) -> Sequence[InviteCode]: ...
+
+    async def issue_rebind_code(
+        self,
+        actor: AccessContext,
+        *,
+        member_id: int,
+        now: dt.datetime,
+    ) -> InviteCode: ...
+
+    async def membership_count(self, user_id: int) -> int: ...
 
 
 # --------------------------------------------------------------------------------------
@@ -300,6 +312,45 @@ async def set_member_role(
         await callback.answer(texts.STAFF_OWNER_ONLY_REFUSED, show_alert=True)
         return
     await _render(bot, callback, member_screen(entry, actor=actor))
+
+
+async def rebind_member(
+    callback: CallbackQuery,
+    bot: Bot,
+    actor: AccessContext,
+    services: StaffServices,
+    access: Invites,
+    callback_payload: MemberRebind,
+) -> None:
+    """Issue a code that points this card at another Telegram account (TZ 5.1).
+
+    The manager forwards it to the person's *new* account. Nothing moves until that account
+    confirms — which is why this is a code and not a field the manager types.
+    """
+    entry = await services.members.get(actor, callback_payload.member_id)
+    if entry is None:
+        await callback.answer(texts.ERROR_NOT_ALLOWED, show_alert=True)
+        return
+    try:
+        code = await access.issue_rebind_code(
+            actor, member_id=callback_payload.member_id, now=utc_now()
+        )
+    except PermissionDeniedError:
+        await callback.answer(texts.STAFF_OWNER_ONLY_REFUSED, show_alert=True)
+        return
+    me = await bot.me()
+    await _render(
+        bot,
+        callback,
+        rebind_code_screen(
+            full_name=entry.full_name,
+            code=code.code,
+            link=deeplink(me.username or "", invite_deeplink_payload(code.code)),
+            code_id=code.id,
+            # TZ 2: `telegram_id` is one per person, so the move reaches every other venue.
+            other_venues=max(0, await access.membership_count(entry.user_id) - 1),
+        ),
+    )
 
 
 async def start_member_edit(
@@ -540,6 +591,7 @@ def router() -> Router:
     instance.callback_query.register(set_member_active, MemberActive.filter())
     instance.callback_query.register(set_member_role, MemberSetRole.filter())
     instance.callback_query.register(start_member_edit, MemberEdit.filter())
+    instance.callback_query.register(rebind_member, MemberRebind.filter())
     instance.message.register(
         finish_member_edit,
         StateFilter(MemberEditing.full_name, MemberEditing.position),
