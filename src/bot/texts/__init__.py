@@ -193,6 +193,7 @@ from src.bot.texts.notifications import (
     notification_headline,
 )
 from src.bot.texts.onboarding import (
+    ONBOARDING_CODE_ALREADY_MEMBER,
     ONBOARDING_CODE_EXPIRED,
     ONBOARDING_CODE_UNKNOWN,
     ONBOARDING_CODE_USED,
@@ -362,6 +363,7 @@ __all__ = [
     "NOTIFY_PENDING_WITH_GROUP_TEMPLATE",
     "NOTIFY_SKIP_COMMENT_TEMPLATE",
     "NO_BUTTON",
+    "ONBOARDING_CODE_ALREADY_MEMBER",
     "ONBOARDING_CODE_EXPIRED",
     "ONBOARDING_CODE_UNKNOWN",
     "ONBOARDING_CODE_USED",

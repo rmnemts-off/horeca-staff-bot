@@ -260,6 +260,12 @@ class InviteRejection(enum.StrEnum):
     EXPIRED = "expired"
     REVOKED = "revoked"
     ALREADY_USED = "already_used"
+    #: The person typing it already works here. Unlike every other member of this enum the
+    #: code survives: it was never meant for them, so consuming it would destroy an invite
+    #: somebody else is waiting for. This is not hypothetical — an owner opened his own
+    #: link to check that it worked, the single use was spent on him, and the colleague he
+    #: had already forwarded it to was told the code had been used.
+    ALREADY_MEMBER = "already_member"
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,8 +701,20 @@ class AccessService:
         require_manager(actor)
         return await self.repositories.invites(actor.venue_id).revoke(code_id, as_utc(now))
 
-    async def preview_invite_code(self, raw_code: str, *, now: dt.datetime) -> InvitePreview:
-        """Validate a code without consuming it (TZ 5.1: confirm the name and position)."""
+    async def preview_invite_code(
+        self,
+        raw_code: str,
+        *,
+        now: dt.datetime,
+        telegram_id: int | None = None,
+    ) -> InvitePreview:
+        """Validate a code without consuming it (TZ 5.1: confirm the name and position).
+
+        `telegram_id` is optional only because a caller may genuinely not have one; when it
+        is there, an active member is turned away here rather than three screens later, and
+        without the code being touched. That is the whole point of refusing at the preview:
+        the person is one confirmation away from spending somebody else's invitation.
+        """
         moment = as_utc(now)
         parsed = parse_invite_code(raw_code)
         if parsed is None:
@@ -706,6 +724,12 @@ class AccessService:
         if found is None:
             return _rejected_preview(InviteRejection.UNKNOWN)
         rejection = _invite_rejection(found, moment)
+        if (
+            rejection is None
+            and telegram_id is not None
+            and await self._is_active_member(venue_id, telegram_id=telegram_id)
+        ):
+            rejection = InviteRejection.ALREADY_MEMBER
         return InvitePreview(
             venue_id=venue_id,
             code_id=found.id,
@@ -714,6 +738,18 @@ class AccessService:
             suggested_full_name=found.full_name,
             rejection=rejection,
         )
+
+    async def _is_active_member(self, venue_id: int, *, telegram_id: int) -> bool:
+        """Does this Telegram account already work in this venue?
+
+        Read through the venue's own repository, so the question cannot accidentally be
+        answered about the venue next door (TZ 3.3).
+        """
+        user = await self.repositories.users.get_by_telegram_id(telegram_id)
+        if user is None:
+            return False
+        member = await self.repositories.members(venue_id).get_for_user(user.id)
+        return member is not None and member.is_active
 
     async def activate_invite_code(
         self,
@@ -731,6 +767,18 @@ class AccessService:
         decision B8). Re-entering a code that has already been used is refused — that is
         what "single use" means — and a person who is already a member keeps their row,
         because deactivation must never lose history (TZ 5.1).
+
+        **A code grants access and never takes any away.** Three shapes, and the middle one
+        is the fix for two live incidents:
+
+        * nobody by that Telegram id works here — the row is created from the code;
+        * an *active* member typed it — refused with `ALREADY_MEMBER`, and **the code is
+          left unused**. It was issued for somebody else, and burning it destroys their
+          invitation. Both incidents were this: an owner opened his own link to see that it
+          worked and was demoted by it, and later spent the single use of a link he had
+          already forwarded to a colleague;
+        * a dismissed member came back — the row is reactivated, and the role can only go
+          *up*: a returning manager does not become `staff` because the code said so.
         """
         moment = as_utc(now)
         parsed = parse_invite_code(raw_code)
@@ -746,13 +794,20 @@ class AccessService:
         if rejection is not None:
             return InviteActivation(rejection=rejection, venue_id=venue_id)
 
+        members = self.repositories.members(venue_id)
+        known = await self.repositories.users.get_by_telegram_id(telegram_id)
+        seated = None if known is None else await members.get_for_user(known.id)
+        if seated is not None and seated.is_active:
+            # Checked before `_upsert_user`, so a refused activation writes nothing at all —
+            # not the row, not the code, not the name.
+            return InviteActivation(rejection=InviteRejection.ALREADY_MEMBER, venue_id=venue_id)
+
         user = await self._upsert_user(
             telegram_id=telegram_id,
             full_name=full_name or (found.full_name or ""),
             username=username,
         )
-        members = self.repositories.members(venue_id)
-        existing = await members.get_for_user(user.id)
+        existing = seated
         if existing is None:
             member = await members.add(
                 user_id=user.id,
@@ -761,15 +816,17 @@ class AccessService:
             )
             was_member = False
         else:
-            # Read before writing: `update` mutates the very row `existing` points at (the
-            # identity map hands back one object per id), so asking afterwards would always
-            # answer "active" — the value this line just wrote.
-            was_member = existing.is_active
-            # TZ 5.1: a returning employee keeps the row that carries their history.
+            # TZ 5.1: a returning employee keeps the row that carries their history. The
+            # role is the higher of the two: the code may promote a returning employee, and
+            # may not quietly demote one (TZ 2).
+            was_member = False
+            restored = (
+                found.role if role_rank(found.role) > role_rank(existing.role) else existing.role
+            )
             updated = await members.update(
                 existing.id,
-                role=found.role,
-                position=found.position,
+                role=restored,
+                position=found.position or existing.position,
                 is_active=True,
             )
             member = updated if updated is not None else existing
@@ -800,9 +857,13 @@ class AccessService:
                 full_name=full_name,
                 username=username,
             )
+        # `full_name` is deliberately absent from what an activation may write. The column
+        # is on the global `users` row, so it is the name every venue this person works in
+        # can see, and a code carrying somebody else's name would rewrite it in all of them
+        # (TZ 2). Correcting the name of a person the system already knows is the manager's
+        # own act — `MemberService.rename`, decision B8. Observed twice on the live stand:
+        # the owner's name flipped between two codes he opened himself.
         fields: dict[str, object] = {}
-        if full_name and full_name != existing.full_name:
-            fields["full_name"] = full_name
         if username is not None and username != existing.username:
             fields["username"] = username
         if not existing.is_active:

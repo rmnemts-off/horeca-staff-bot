@@ -131,6 +131,7 @@ class FakeAccess:
         #: because nothing else in the product writes one for the first owner, and a fake
         #: that answered without recording would let the call be dropped again.
         self.bootstrapped: list[tuple[int, str, str | None]] = []
+        self.previewed: list[tuple[str, int | None]] = []
 
     async def ensure_bootstrap_user(
         self,
@@ -142,8 +143,18 @@ class FakeAccess:
         self.bootstrapped.append((telegram_id, full_name, username))
         return User(id=telegram_id, telegram_id=telegram_id, full_name=full_name, is_active=True)
 
-    async def preview_invite_code(self, raw_code: str, *, now: dt.datetime) -> InvitePreview:
+    async def preview_invite_code(
+        self,
+        raw_code: str,
+        *,
+        now: dt.datetime,
+        telegram_id: int | None = None,
+    ) -> InvitePreview:
         assert now.tzinfo is not None, "decision D12: every instant crossing a service is aware"
+        # Recorded, not ignored: the handler is supposed to say *who* is asking, and the
+        # test below asserts that it does. A fake that swallowed the argument would let the
+        # handler stop passing it and stay green — the refusal would silently come back.
+        self.previewed.append((raw_code, telegram_id))
         invite = self.invites.get(raw_code)
         if invite is None:
             return InvitePreview(

@@ -1211,11 +1211,100 @@ async def test_a_returning_employee_keeps_the_row_that_carries_their_history(
     assert activation.user.id == user.id
 
 
-async def test_an_active_member_typing_a_fresh_code_is_told_they_were_already_in(
+async def test_an_active_member_typing_a_fresh_code_is_refused_and_the_code_survives(
     stand: Stand,
 ) -> None:
+    """The incident this exists for, in five lines.
+
+    An owner opened the invite link he had just issued — to check that it opened. The
+    single use was spent on him, and the colleague he had already forwarded it to was told
+    the code had been used. Nobody could see why: the code looked fine on the manager's
+    screen right up to the moment it did not exist.
+
+    So the refusal must leave the code **exactly** as it found it. `used_at` and `used_by`
+    are asserted, not just the outcome — the outcome could be right while the row is
+    already burnt.
+    """
+    _, member = seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.MANAGER)
+    code = seed_code(stand, role=MemberRole.STAFF)
+
+    activation = await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Кто-то другой",
+        now=NOW,
+    )
+
+    assert activation.is_activated is False
+    assert activation.rejection is InviteRejection.ALREADY_MEMBER
+    assert code.used_at is None, "the invitation belongs to somebody else and is still live"
+    assert code.used_by is None
+    assert member.role is MemberRole.MANAGER, "and the role it did not ask about is untouched"
+
+
+async def test_the_refusal_reaches_the_person_before_they_confirm_anything(
+    stand: Stand,
+) -> None:
+    """Preview refuses too, so nobody walks three screens to be turned away at the end."""
     seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
     code = seed_code(stand)
+
+    preview = await stand.service.preview_invite_code(
+        code.code,
+        now=NOW,
+        telegram_id=STAFF_TG,
+    )
+
+    assert preview.rejection is InviteRejection.ALREADY_MEMBER
+    assert preview.is_valid is False
+
+
+async def test_a_stranger_still_gets_the_code_the_preview_promised(stand: Stand) -> None:
+    """The new refusal is aimed at one case and must not catch anybody else."""
+    code = seed_code(stand)
+
+    preview = await stand.service.preview_invite_code(code.code, now=NOW, telegram_id=STAFF_TG)
+
+    assert preview.is_valid is True
+
+
+async def test_a_member_of_another_venue_is_not_an_existing_member_here(stand: Stand) -> None:
+    """TZ 3.3: the question is asked through this venue's repository, not about the person.
+
+    Somebody who works next door is a stranger here, and the invitation is genuinely theirs
+    to use — refusing it would make a second venue impossible to join.
+    """
+    seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF, venue_id=OTHER_VENUE_ID)
+    code = seed_code(stand)
+
+    preview = await stand.service.preview_invite_code(code.code, now=NOW, telegram_id=STAFF_TG)
+    activation = await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Анна",
+        now=NOW,
+    )
+
+    assert preview.is_valid is True
+    assert activation.is_activated is True
+
+
+async def test_a_dismissed_manager_is_not_demoted_by_the_code_that_brings_them_back(
+    stand: Stand,
+) -> None:
+    """TZ 2 and TZ 5.1: a code adds access and never takes any away.
+
+    The returning employee keeps the row carrying their history, and the role is the higher
+    of the two — otherwise handing a returning manager an ordinary staff code would quietly
+    strip them, which is the same defect that demoted the owner.
+    """
+    _, member = seed_member(
+        stand,
+        telegram_id=STAFF_TG,
+        role=MemberRole.MANAGER,
+        member_active=False,
+    )
+    code = seed_code(stand, role=MemberRole.STAFF)
 
     activation = await stand.service.activate_invite_code(
         code.code,
@@ -1225,7 +1314,33 @@ async def test_an_active_member_typing_a_fresh_code_is_told_they_were_already_in
     )
 
     assert activation.is_activated is True
-    assert activation.was_already_member is True
+    assert member.is_active is True
+    assert member.role is MemberRole.MANAGER
+
+
+async def test_a_code_never_renames_somebody_the_system_already_knows(stand: Stand) -> None:
+    """`users.full_name` is global, so a code carrying another name rewrites every venue.
+
+    Observed live: the owner's name flipped between two codes he opened himself. Correcting
+    a known person's name is the manager's own act (decision B8, `MemberService.rename`).
+    """
+    user, _ = seed_member(
+        stand,
+        telegram_id=STAFF_TG,
+        role=MemberRole.STAFF,
+        full_name="Анна Иванова",
+        member_active=False,
+    )
+    code = seed_code(stand, full_name="Мария Сидорова")
+
+    await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Мария Сидорова",
+        now=NOW,
+    )
+
+    assert user.full_name == "Анна Иванова"
 
 
 async def test_activation_does_not_move_somebody_who_already_chose_a_venue(

@@ -61,6 +61,7 @@ REJECTION_TEXTS: Final[Mapping[InviteRejection, str]] = {
     InviteRejection.REVOKED: texts.ONBOARDING_CODE_UNKNOWN,
     InviteRejection.EXPIRED: texts.ONBOARDING_CODE_EXPIRED,
     InviteRejection.ALREADY_USED: texts.ONBOARDING_CODE_USED,
+    InviteRejection.ALREADY_MEMBER: texts.ONBOARDING_CODE_ALREADY_MEMBER,
 }
 
 

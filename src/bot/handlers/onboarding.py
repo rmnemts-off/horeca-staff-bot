@@ -282,7 +282,14 @@ async def _offer_the_code(message: Message, *, code: str, **data: Any) -> None:
     state: FSMContext = data[STATE_KEY]
     access: AccessService = data[ACCESS_KEY]
 
-    preview = await access.preview_invite_code(code, now=utc_now())
+    # Who is asking decides one of the outcomes: somebody who already works here is
+    # turned away now, before the code is touched (TZ 5.1).
+    asking = message.from_user
+    preview = await access.preview_invite_code(
+        code,
+        now=utc_now(),
+        telegram_id=None if asking is None else asking.id,
+    )
     if preview.rejection is not None:
         await _refuse_the_code(message, state=state, rejection=preview.rejection)
         return

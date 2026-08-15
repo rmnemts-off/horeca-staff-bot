@@ -26,6 +26,11 @@ ONBOARDING_CODE_UNKNOWN: Final = "Такого кода нет. Проверьт
 #: TZ 5.1: a code lives seven days and is used once.
 ONBOARDING_CODE_EXPIRED: Final = "Срок кода вышел. Попросите новый."
 ONBOARDING_CODE_USED: Final = "Этот код уже сработал. Попросите новый."
+#: The person already works here, so the code was not theirs to use. It stays live for
+#: whoever it was issued to, and the sentence says why nothing happened.
+ONBOARDING_CODE_ALREADY_MEMBER: Final = (
+    "Вы уже в команде — код не понадобился. Роль меняет управляющий."
+)
 
 # --------------------------------------------------------------------------------------
 # With a code
@@ -47,6 +52,7 @@ ONBOARDING_CREATE_VENUE_OFFER: Final = "Заведения пока нет. Со
 ONBOARDING_CREATE_VENUE_BUTTON: Final = "Создать заведение"
 
 __all__ = [
+    "ONBOARDING_CODE_ALREADY_MEMBER",
     "ONBOARDING_CODE_EXPIRED",
     "ONBOARDING_CODE_UNKNOWN",
     "ONBOARDING_CODE_USED",
