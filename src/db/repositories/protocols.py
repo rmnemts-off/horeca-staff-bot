@@ -153,6 +153,8 @@ class VenueMemberRepository(Protocol):
 
     async def list_by_role(self, role: MemberRole) -> Sequence[VenueMember]: ...
 
+    async def count_active_by_role(self, role: MemberRole, *, for_update: bool = False) -> int: ...
+
     async def add(
         self,
         *,

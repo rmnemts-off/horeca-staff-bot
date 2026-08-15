@@ -38,10 +38,16 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from src.db.repositories.audit import AFTER_KEY, BEFORE_KEY, as_json, changed_fields
-from src.services.access import AccessContext
+
+if TYPE_CHECKING:  # pragma: no cover - the import exists for annotations only
+    # Type-only, and it has to be: `src.services.access` writes its own activations to
+    # the trail (TZ 2), so a runtime import here would close the loop. Annotations are
+    # strings under `from __future__ import annotations`, and nothing below touches the
+    # class itself — only `actor.user_id`.
+    from src.services.access import AccessContext
 
 
 class AuditEntity(enum.StrEnum):

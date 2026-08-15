@@ -87,6 +87,7 @@ from src.db.repositories.protocols import (
     VenueMemberRepository,
     VenueRepository,
 )
+from src.services.audit import AuditAction, AuditEntity, AuditSink, AuditTrail, snapshot
 
 # --------------------------------------------------------------------------------------
 # Constants
@@ -330,6 +331,17 @@ class AccessRepositories(Protocol):
     def members(self, venue_id: int) -> VenueMemberRepository: ...
 
     def invites(self, venue_id: int) -> InviteCodeRepository: ...
+
+    def audit(self, venue_id: int) -> AuditSink | None:
+        """The venue's audit log (TZ 2).
+
+        A default implementation, not an abstract member, and deliberately: every provider
+        in the product supplies one (`RepositoryBundle` has had `audit` since the trail was
+        written), while the narrow fakes in the tests of unrelated behaviour have no reason
+        to grow one. Silence is the safe default for them and impossible for the real
+        bundle, which satisfies the protocol structurally.
+        """
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -834,12 +846,52 @@ class AccessService:
         await invites.mark_used(found.id, used_by=user.id, used_at=moment)
         if user.active_venue_id is None:
             await self.repositories.users.set_active_venue(user.id, venue_id)
+        await self._record_activation(venue_id, user=user, member=member, code=found, at=moment)
 
         return InviteActivation(
             user=user,
             member=member,
             venue_id=venue_id,
             was_already_member=was_member,
+        )
+
+    async def _record_activation(
+        self,
+        venue_id: int,
+        *,
+        user: User,
+        member: VenueMember,
+        code: InviteCode,
+        at: dt.datetime,
+    ) -> None:
+        """Write the membership and the spent code into `audit_log` (TZ 2, decision B13).
+
+        Until this existed, the single most sensitive change in the product left no trace
+        at all: who became a manager, when, and on whose invitation was answerable only by
+        `invite_codes.used_by`, and a role overwritten by an activation was answerable by
+        nothing. `MemberService` has recorded its own edits since it was written; this is
+        the same events arriving by the other road.
+
+        The actor is the person joining. They are the one who acted — nobody else pressed
+        anything — and `audit_log.user_id` is a `users.id`, never a `telegram_id`.
+        """
+        trail = AuditTrail(self.repositories.audit(venue_id))
+        if trail.is_silent:
+            return
+        actor = _context(user, member)
+        await trail.created(
+            actor,
+            AuditEntity.MEMBER,
+            member.id,
+            after=snapshot(member, "user_id", "role", "position", "is_active"),
+        )
+        await trail.updated(
+            actor,
+            AuditEntity.INVITE_CODE,
+            code.id,
+            before={"used_at": None, "used_by": None},
+            after={"used_at": at, "used_by": user.id},
+            action=AuditAction.UPDATE,
         )
 
     async def _upsert_user(

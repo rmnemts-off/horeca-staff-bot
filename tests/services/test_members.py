@@ -37,6 +37,7 @@ from src.services.access import (
     VenueMismatchError,
 )
 from src.services.members import (
+    LastOwnerError,
     MemberError,
     MemberNotFoundError,
     MemberRepositories,
@@ -142,6 +143,9 @@ class MemberStore:
     def __init__(self) -> None:
         self.rows: list[VenueMember] = []
         self._next_id = 1
+        #: Every `count_active_by_role` and whether it took a lock. On the store and not on
+        #: the repository because a scoped repository is built per call and thrown away.
+        self.locked_counts: list[tuple[MemberRole, bool]] = []
 
     def add(
         self,
@@ -186,6 +190,16 @@ class FakeMembers:
 
     async def list_by_role(self, role: MemberRole) -> Sequence[VenueMember]:
         return [row for row in self._scoped() if row.role is role]
+
+    async def count_active_by_role(self, role: MemberRole, *, for_update: bool = False) -> int:
+        """Counted through the same venue predicate the real query uses.
+
+        `for_update` is recorded rather than ignored: the lock is the whole reason the count
+        is trustworthy, and a fake that dropped the flag would let the service stop asking
+        for it while every test stayed green.
+        """
+        self.store.locked_counts.append((role, for_update))
+        return len([row for row in self._scoped() if row.role is role and row.is_active])
 
     async def add(
         self,
@@ -803,3 +817,95 @@ async def test_a_manager_still_switches_off_ordinary_staff(stand: Stand) -> None
     entry = await stand.service.deactivate(boss, hand.id)
 
     assert entry.is_active is False
+
+
+# --------------------------------------------------------------------------------------
+# The venue always has an owner (TZ 2)
+# --------------------------------------------------------------------------------------
+#
+# **This guard cannot fire through the public methods today, and that is the point.** To
+# demote or switch off an owner you must be an owner (`require_outranks_target`) and you may
+# not aim at yourself (`require_not_self`) — so there are always at least two owners at that
+# moment, and one of them survives. The arithmetic is checked below rather than assumed.
+#
+# It is kept as the backstop for the direction the other two guards do not cover: anything
+# that changes a role without coming through them — an import, a migration, a future admin
+# screen — and for the day somebody relaxes one of them. Both roads to a venue with nobody
+# in charge have already been walked on the live stand, and the way back was an `UPDATE` in
+# the database, so a second lock on this particular door is worth its few lines.
+
+
+async def test_ownership_can_be_handed_over_but_not_abandoned(stand: Stand) -> None:
+    """The whole invariant, as the two things a person can actually do.
+
+    One of two owners may step down — that is a handover and must work. The last one may
+    not, and does not need this guard to be stopped: `require_not_self` refuses first,
+    because the only person who could demote the last owner is the last owner.
+    """
+    boss = owner_of(stand)
+    _, second = seed(stand, full_name="Olga", role=MemberRole.OWNER)
+
+    demoted = await stand.service.set_role(boss, second.id, MemberRole.MANAGER)
+    assert demoted.role is MemberRole.MANAGER, "handover works"
+
+    with pytest.raises(SelfTargetError):
+        await stand.service.set_role(boss, boss.member_id, MemberRole.MANAGER)
+
+
+async def test_the_backstop_refuses_to_leave_a_venue_without_an_owner(stand: Stand) -> None:
+    """The guard itself, called the way a future caller would reach it.
+
+    Addressed directly because no public method can get here: see the note above. A test
+    that pretended otherwise would be asserting a scenario the code cannot produce.
+    """
+    boss = owner_of(stand)
+    alone = stand.members.rows[-1]
+
+    with pytest.raises(LastOwnerError):
+        await stand.service._assert_owner_remains(boss, alone, new_role=MemberRole.MANAGER)
+    with pytest.raises(LastOwnerError):
+        await stand.service._assert_owner_remains(boss, alone, new_active=False)
+
+
+async def test_the_backstop_lets_go_when_somebody_else_is_in_charge(stand: Stand) -> None:
+    boss = owner_of(stand)
+    alone = stand.members.rows[-1]
+    seed(stand, full_name="Olga", role=MemberRole.OWNER)
+
+    await stand.service._assert_owner_remains(boss, alone, new_active=False)
+
+
+async def test_an_inactive_owner_does_not_count_as_the_one_in_charge(stand: Stand) -> None:
+    """A switched-off owner opens no screens, so they cannot be what keeps the venue safe."""
+    boss = owner_of(stand)
+    alone = stand.members.rows[-1]
+    seed(stand, full_name="Pavel", role=MemberRole.OWNER, member_active=False)
+
+    with pytest.raises(LastOwnerError):
+        await stand.service._assert_owner_remains(boss, alone, new_active=False)
+
+
+async def test_the_count_is_locked_while_it_decides(stand: Stand) -> None:
+    """Two owners stepping down at the same instant would both see a colleague.
+
+    Verified by mutation: dropping `for_update=True` fails this test and nothing else,
+    which is the only place the flag is observable from.
+    """
+    boss = owner_of(stand)
+    alone = stand.members.rows[-1]
+
+    with pytest.raises(LastOwnerError):
+        await stand.service._assert_owner_remains(boss, alone, new_active=False)
+
+    assert stand.members.locked_counts == [(MemberRole.OWNER, True)]
+
+
+async def test_an_operation_that_keeps_the_role_never_asks_about_owners(stand: Stand) -> None:
+    """The query takes a lock, so it runs only when ownership is genuinely at stake."""
+    boss = owner_of(stand)
+    _, hand = seed(stand, full_name="Nina")
+
+    await stand.service.deactivate(boss, hand.id)
+    await stand.service.set_position(boss, hand.id, "бармен")
+
+    assert stand.members.locked_counts == []

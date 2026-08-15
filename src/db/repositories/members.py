@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from sqlalchemy import select
+
 from src.db.models import MemberRole, VenueMember
 from src.db.repositories.base import BaseRepository
 
@@ -60,6 +62,24 @@ class VenueMemberRepo(BaseRepository[VenueMember]):
         """Everyone holding one role, active or not (TZ 6 resolves notification recipients)."""
         statement = self.for_venue().where(VenueMember.role == role).order_by(VenueMember.id)
         return (await self.session.scalars(statement)).all()
+
+    async def count_active_by_role(self, role: MemberRole, *, for_update: bool = False) -> int:
+        """How many people hold this role and still work here (TZ 2).
+
+        `for_update` locks the rows it counted. The invariant this serves — a venue is never
+        left without an owner — is a read followed by a write, and two owners demoting each
+        other at the same moment would both read "there are two of us" and both proceed.
+        The lock is on the rows of the role being counted, so ordinary work does not meet it.
+        """
+        statement = (
+            select(VenueMember.id)
+            .where(VenueMember.venue_id == self.venue_id)
+            .where(VenueMember.role == role)
+            .where(VenueMember.is_active.is_(True))
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return len((await self.session.scalars(statement)).all())
 
     async def add(
         self,

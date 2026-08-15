@@ -372,6 +372,49 @@ class FakeInvites:
         return row
 
 
+class AuditStore:
+    """Rows of `audit_log`, in the order they were written, of every venue.
+
+    One store and not one per venue, exactly like the table: the scope is the predicate the
+    sink was built with, so a row of the venue next door is written here and simply not
+    attributed to this one (CLAUDE.md).
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    def entries(self, venue_id: int) -> list[dict[str, Any]]:
+        return [row for row in self.rows if row["venue_id"] == venue_id]
+
+
+class FakeAudit:
+    """`AuditLogRepository` as `AuditSink` sees it: append-only, scoped to one venue."""
+
+    def __init__(self, store: AuditStore, venue_id: int) -> None:
+        self.store = store
+        self.venue_id = venue_id
+
+    async def record(
+        self,
+        *,
+        user_id: int | None,
+        entity: str,
+        entity_id: int | None,
+        action: str,
+        diff: dict[str, Any] | None = None,
+    ) -> None:
+        self.store.rows.append(
+            {
+                "venue_id": self.venue_id,
+                "user_id": user_id,
+                "entity": entity,
+                "entity_id": entity_id,
+                "action": action,
+                "diff": diff,
+            }
+        )
+
+
 @dataclass(slots=True)
 class FakeRepositories:
     """The `AccessRepositories` protocol: two globals and two factories."""
@@ -380,6 +423,7 @@ class FakeRepositories:
     member_store: MemberStore
     invite_store: InviteStore
     venue_rows: list[Venue]
+    audit_store: AuditStore
 
     @property
     def users(self) -> FakeUsers:
@@ -394,6 +438,9 @@ class FakeRepositories:
 
     def invites(self, venue_id: int) -> FakeInvites:
         return FakeInvites(self.invite_store, venue_id)
+
+    def audit(self, venue_id: int) -> FakeAudit:
+        return FakeAudit(self.audit_store, venue_id)
 
 
 # --------------------------------------------------------------------------------------
@@ -418,12 +465,17 @@ class Stand:
     def invites(self) -> InviteStore:
         return self.repositories.invite_store
 
+    @property
+    def audit(self) -> AuditStore:
+        return self.repositories.audit_store
+
 
 def build(*, bootstrap: Sequence[int] = ()) -> Stand:
     repositories = FakeRepositories(
         user_store=UserStore(),
         member_store=MemberStore(),
         invite_store=InviteStore(),
+        audit_store=AuditStore(),
         venue_rows=[
             Venue(
                 id=VENUE_ID,
@@ -1484,3 +1536,83 @@ def test_this_service_is_the_recipient_resolver_the_queue_asks(stand: Stand) -> 
     """
     resolver: ManagerRecipients = stand.service
     assert resolver is stand.service
+
+
+# --------------------------------------------------------------------------------------
+# The trail of an activation (TZ 2, decision B13)
+# --------------------------------------------------------------------------------------
+#
+# Until these existed, the most sensitive change in the product left no trace at all. Who
+# became a manager, when, and on whose invitation was answerable only from
+# `invite_codes.used_by`; a role overwritten by an activation was answerable by nothing.
+# `MemberService` has recorded its own edits since it was written — this is the same events
+# arriving by the other road, and they were the road that was missing.
+
+
+async def test_joining_a_venue_is_written_down(stand: Stand) -> None:
+    code = seed_code(stand, role=MemberRole.MANAGER, position="бармен")
+
+    activation = await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Анна",
+        now=NOW,
+    )
+
+    assert activation.member is not None
+    entries = stand.audit.entries(VENUE_ID)
+    membership = next(entry for entry in entries if entry["entity"] == "venue_members")
+    assert membership["action"] == "create"
+    assert membership["entity_id"] == activation.member.id
+    assert membership["diff"]["role"]["to"] == MemberRole.MANAGER
+    assert membership["user_id"] == activation.member.user_id, (
+        "audit_log.user_id is a users.id and never a telegram_id"
+    )
+
+
+async def test_spending_a_code_is_written_down(stand: Stand) -> None:
+    """Who used which invitation, and when — the question `used_by` alone cannot answer."""
+    code = seed_code(stand)
+
+    await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Анна",
+        now=NOW,
+    )
+
+    spent = next(
+        entry for entry in stand.audit.entries(VENUE_ID) if entry["entity"] == "invite_codes"
+    )
+    assert spent["entity_id"] == code.id
+    assert spent["diff"]["used_by"]["to"] == code.used_by
+
+
+async def test_a_refused_activation_writes_nothing_anywhere(stand: Stand) -> None:
+    """The refusal of an active member must leave the venue exactly as it found it."""
+    seed_member(stand, telegram_id=STAFF_TG, role=MemberRole.STAFF)
+    code = seed_code(stand)
+
+    await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Анна",
+        now=NOW,
+    )
+
+    assert stand.audit.rows == []
+
+
+async def test_the_trail_of_one_venue_does_not_land_in_another(stand: Stand) -> None:
+    """TZ 3.3: the sink is built for a venue, so the row cannot be attributed elsewhere."""
+    code = seed_code(stand, venue_id=OTHER_VENUE_ID)
+
+    await stand.service.activate_invite_code(
+        code.code,
+        telegram_id=STAFF_TG,
+        full_name="Анна",
+        now=NOW,
+    )
+
+    assert stand.audit.entries(VENUE_ID) == []
+    assert len(stand.audit.entries(OTHER_VENUE_ID)) == 2

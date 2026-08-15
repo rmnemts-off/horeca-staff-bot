@@ -57,6 +57,22 @@ class MemberError(AccessError):
     """Base class for the refusals of this module."""
 
 
+class LastOwnerError(MemberError):
+    """The operation would leave the venue with nobody in charge (TZ 2).
+
+    The strictest of the refusals here, and the one with the least sympathetic error
+    message, because it is the only irreversible one. A venue whose last owner is gone
+    cannot issue a code above `staff` (that needs an owner) and cannot promote anybody
+    (that needs an owner either), so there is no way back through the product at all —
+    only an `UPDATE` in the database. Both roads to it have been walked on the live stand.
+    """
+
+    def __init__(self, venue_id: int, member_id: int) -> None:
+        super().__init__(f"membership {member_id} is the last active owner of venue {venue_id}")
+        self.venue_id = venue_id
+        self.member_id = member_id
+
+
 class MemberNotFoundError(MemberError):
     """No such membership in the actor's venue.
 
@@ -181,6 +197,7 @@ class MemberService:
         current = await self._require_member(actor, member_id)
         require_not_self(actor, current)
         require_outranks_target(actor, current)
+        await self._assert_owner_remains(actor, current, new_active=False)
         return await self._set_active(actor, current, is_active=False)
 
     async def reactivate(self, actor: AccessContext, member_id: int) -> RosterEntry:
@@ -211,6 +228,7 @@ class MemberService:
         require_outranks_target(actor, current)
         if role_rank(role) >= role_rank(MemberRole.MANAGER):
             require_owner(actor)
+        await self._assert_owner_remains(actor, current, new_role=role)
         return await self._update(actor, member_id, role=role)
 
     async def set_position(
@@ -253,6 +271,35 @@ class MemberService:
         return RosterEntry(member=member, user=user)
 
     # -- internals ----------------------------------------------------------------------
+
+    async def _assert_owner_remains(
+        self,
+        actor: AccessContext,
+        member: VenueMember,
+        *,
+        new_role: MemberRole | None = None,
+        new_active: bool | None = None,
+    ) -> None:
+        """Refuse an operation after which the venue would have no active owner (TZ 2).
+
+        Only the last owner is counted, and only when the operation actually takes the
+        ownership away — promoting somebody, renaming anybody, or switching off a bartender
+        never reaches the query. The count locks the owner rows it read: without that, two
+        owners demoting each other in the same instant would both see a colleague and both
+        succeed (`count_active_by_role(for_update=True)`).
+        """
+        if member.role is not MemberRole.OWNER or not member.is_active:
+            return
+        stays_owner = new_role is None or new_role is MemberRole.OWNER
+        stays_active = new_active is None or new_active
+        if stays_owner and stays_active:
+            return
+        owners = await self.repositories.members(actor.venue_id).count_active_by_role(
+            MemberRole.OWNER,
+            for_update=True,
+        )
+        if owners <= 1:
+            raise LastOwnerError(actor.venue_id, member.id)
 
     async def _require_member(self, actor: AccessContext, member_id: int) -> VenueMember:
         member = await self.repositories.members(actor.venue_id).get(member_id)
@@ -317,6 +364,7 @@ class MemberService:
 
 
 __all__ = [
+    "LastOwnerError",
     "MemberError",
     "MemberNotFoundError",
     "MemberRepositories",
